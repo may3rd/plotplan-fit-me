@@ -174,8 +174,30 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     DXF/takeoff from the browser, or per-violation detail beyond the single
     feasible/infeasible flag — see `frontend/README.md`'s "not built"
     section.
-11. `[ ]` **CP-SAT / MILP solver** — OR-Tools, swapped in only if simulated
-    annealing stalls on >30 equipment items. *Effort: L.*
+11. `[x]` **CP-SAT / MILP solver** — OR-Tools, swapped in only if simulated
+    annealing stalls on >30 equipment items. The gate was measured true
+    first (see CLAUDE.md self-learning): `random_place()`'s scatter-then-
+    reject init starts failing outright above ~27-30 movable items even on
+    a generously oversized site. `solve_cpsat()` in `backend/plotplan.py`
+    builds a feasible layout by constraint construction on a 0.5 m grid
+    instead — same feasibility rules as `feasible()`/`_check()` (site
+    bounds, rack corridors, keep-out zones as their bounding box, pairwise
+    class spacing, tube-pull clearance, prevailing wind, pinned equipment),
+    every safety-relevant conversion rounded in the conservative direction
+    so a grid-feasible solution decoded back to real meters is always
+    real-feasible. `solve_ranked()` now dispatches to it automatically once
+    movable count exceeds `CPSAT_THRESHOLD` (30) — no new CLI flag, no
+    change needed in `backend/api.py`. Objective optimizes pipe rise+run+
+    drop (not the rack-steel-span term — see the ponytail note in
+    `solve_cpsat()`); the returned score is still the true, complete
+    `piping_cost()`. Verified: reproduces SA's exact score (5310) on a site
+    SA could still solve; solves a tight 35-item site across 8 seeds that
+    previously crashed SA outright, `_check()` passing on all of them; a
+    combined-constraint unit (pinned heater, keepout zone, pull clearance,
+    wind, two racks, 35 items) passes `_check()` including the pinned
+    item's exact-position invariant. `backend/test_cpsat.py` is the
+    self-check (no fixtures — the unit is synthetic and built in-memory).
+    *Effort: L.*
 
 ## Non-goals (explicit, don't creep in)
 

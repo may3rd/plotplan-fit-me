@@ -41,7 +41,29 @@ python plotplan.py data/my_unit 3   # any unit dir, any seed
 
 Writes `plotplan.dxf` and `plotplan_takeoff.csv`. A `start:end` seed range
 prints a ranked score table and writes only the best-scoring layout. Stdlib
-only — no installs.
+only for the SA solver — installs are only needed for the CP-SAT solver
+(>30 items) and the web UI below.
+
+## Run the web UI
+
+Backend (from `backend/`, first time only: `python3 -m venv .venv &&
+.venv/bin/pip install -r requirements.txt`):
+
+```
+backend/.venv/bin/uvicorn api:app --reload --port 8000 --app-dir backend
+```
+
+Frontend (from `frontend/`, first time only: `npm install`):
+
+```
+cd frontend
+npm run dev
+```
+
+Open the printed localhost URL (default `http://localhost:5173`) — the Vite
+dev server proxies `/api/*` to the backend on port 8000, so both need to be
+running. Pick a unit, drag equipment for live feasibility/score feedback, or
+click Solve. Details and what's not built yet: `frontend/README.md`.
 
 ## A unit's data
 
@@ -90,10 +112,11 @@ reference dataset: `backend/data/sample_unit/`.
   React/Vite frontend: drag equipment with live feasibility/score feedback,
   or click Solve to run the CLI's seed-ranking solver in the browser. See
   `frontend/README.md`.
-
-## Nice to have (see PLAN.md for build order)
-
-1. CP-SAT / MILP solver (only if SA stalls on >30 items)
+- **CP-SAT solver** — above 30 movable items, `solve_ranked()` automatically
+  switches from simulated annealing to OR-Tools CP-SAT, which builds a
+  feasible layout by constraint construction instead of SA's random-scatter
+  init (which starts failing outright at that scale). Same CLI, same
+  output — no flag needed.
 
 ## Non-goals for now
 

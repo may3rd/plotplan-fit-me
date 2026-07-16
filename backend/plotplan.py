@@ -13,6 +13,8 @@ import random
 import sys
 from dataclasses import dataclass
 
+from ortools.sat.python import cp_model
+
 # ---------------------------------------------------------------- data model
 
 @dataclass
@@ -333,6 +335,238 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
         e.x, e.y, e.w, e.d = x, y, w, d
     return best
 
+# ------------------------------------------------------ CP-SAT solver (item 11)
+# ponytail: only reached above CPSAT_THRESHOLD movable items — see CLAUDE.md
+# self-learning log for the measurement. Past ~30 items, random_place()'s
+# scatter-then-reject-infeasible init starts failing outright even on a
+# generously oversized site, because the odds of an all-N-item feasible
+# random scatter collapse combinatorially. CP-SAT builds a feasible layout
+# by constraint construction instead of by rejection sampling, so it
+# doesn't have that failure mode — at the cost of a coarse position grid
+# (CPSAT_GRID_M) instead of SA's continuous coordinates.
+
+CPSAT_THRESHOLD = 30   # movable-item count above which solve_ranked() switches to CP-SAT
+CPSAT_GRID_M = 0.5     # ponytail: position/length discretization for the CP-SAT model.
+                       # Every safety-relevant quantity is rounded in the conservative
+                       # direction (footprint sizes and clearances UP, site bounds and
+                       # keep-out boxes to fully contain the real zone) so a grid-feasible
+                       # layout, decoded back to exact meters, is always real-feasible —
+                       # feasible()/_check() re-verify this after every CP-SAT solve.
+                       # Halving CPSAT_GRID_M roughly doubles model size; tune down only
+                       # if a real unit needs sub-0.5m placement precision.
+
+def _g_ceil(meters: float, grid_m: float) -> int:
+    return math.ceil(meters / grid_m - 1e-9)
+
+def _g_floor(meters: float, grid_m: float) -> int:
+    return math.floor(meters / grid_m + 1e-9)
+
+# ponytail: CP-SAT is free to place a solution exactly touching a clearance
+# boundary (its constraints are non-strict <=/>=); feasible()'s check is
+# strict (`<`), so floating-point noise right at an exact-equality boundary
+# can flip the verdict after decoding back to real meters. Padding every
+# required minimum (gaps, rack half-width, pull/wind clearance) by this
+# margin before ceiling means the modeled requirement is always a hair
+# stricter than the real one — decoded solutions clear feasible()'s check
+# with room to spare instead of landing exactly on its floating-point edge.
+CPSAT_EPS_M = 0.01
+
+def _cpsat_no_overlap(model, a, b, gap_grid: int, name: str):
+    """a, b: (left, bottom, right, top) linear expressions/ints. Require the
+    two rectangles separated by >= gap_grid in x or y (reified 4-way
+    disjunction) — the axis-aligned approximation of edge_gap(), stronger
+    than the exact Euclidean check in the diagonal case, so every solution
+    found this way already satisfies feasible()'s exact check."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    left = model.NewBoolVar(f"{name}_l")
+    right = model.NewBoolVar(f"{name}_r")
+    below = model.NewBoolVar(f"{name}_b")
+    above = model.NewBoolVar(f"{name}_a")
+    model.Add(ax2 + gap_grid <= bx1).OnlyEnforceIf(left)
+    model.Add(bx2 + gap_grid <= ax1).OnlyEnforceIf(right)
+    model.Add(ay2 + gap_grid <= by1).OnlyEnforceIf(below)
+    model.Add(by2 + gap_grid <= ay1).OnlyEnforceIf(above)
+    model.AddBoolOr([left, right, below, above])
+
+def _cpsat_avoid_band(model, bottom, top, lo: int, hi: int, name: str):
+    """Require [bottom, top] fully outside [lo, hi] (a rack corridor, already
+    expanded outward to a superset of the real corridor)."""
+    below = model.NewBoolVar(f"{name}_below")
+    above = model.NewBoolVar(f"{name}_above")
+    model.Add(top <= lo).OnlyEnforceIf(below)
+    model.Add(bottom >= hi).OnlyEnforceIf(above)
+    model.AddBoolOr([below, above])
+
+def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
+                 seed: int = 0, time_limit_s: float = 20.0, grid_m: float = CPSAT_GRID_M) -> float:
+    """CP-SAT layout solver — same feasibility rules as feasible()/_check()
+    (site bounds, rack corridors, keep-out zones, pairwise class spacing,
+    tube-pull clearance, prevailing wind, pinned equipment), reformulated as
+    linear/disjunctive constraints on a grid_m-meter grid. Returns the same
+    real (continuous, un-rounded) piping_cost() as solve() — see the
+    ponytail notes below for the two things this simplifies relative to the
+    SA solver.
+    ponytail: keep-out zones use their axis-aligned bounding box, not the
+    exact polygon — exact for this repo's zones (all rectangles; see
+    keepouts.csv), conservative (larger exclusion) for a genuinely concave
+    zone. Upgrade to per-edge half-plane constraints if a real unit ships a
+    non-rectangular zone this wrongly rejects.
+    ponytail: the objective minimizes pipe rise+run+drop (the dominant
+    term) but not piping_cost()'s rack-steel-span term — exactly modeling
+    "x-span of only the items actually routed onto a used rack" needs
+    conditional min/max bookkeeping that isn't worth it for a secondary
+    cost term. The RETURNED score is still the true, complete piping_cost()
+    (rack steel included), computed after decoding positions — CP-SAT just
+    doesn't chase that last term during search.
+    """
+    spacing = DEFAULT_SPACING if spacing is None else spacing
+    keepouts = keepouts or {}
+    G = grid_m
+    pinned = [e for e in eq if e.pinned]
+    if pinned and not feasible(pinned, site, spacing, keepouts):
+        raise RuntimeError("pinned equipment violates site/spacing/keepout constraints on its own")
+
+    model = cp_model.CpModel()
+    site_w = _g_floor(site.w, G)
+    site_d = _g_floor(site.d, G)
+    racks = [(_g_floor(ry - rhalf - CPSAT_EPS_M, G), _g_ceil(ry + rhalf + CPSAT_EPS_M, G))
+              for ry, rhalf in site.racks]
+    kboxes = []
+    for poly in keepouts.values():
+        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+        kboxes.append((_g_floor(min(xs), G), _g_floor(min(ys), G),
+                        _g_ceil(max(xs), G), _g_ceil(max(ys), G)))
+
+    L, B, FW, FD, ROT = {}, {}, {}, {}, {}
+    for e in eq:
+        l = model.NewIntVar(0, site_w, f"L_{e.tag}")
+        b = model.NewIntVar(0, site_d, f"B_{e.tag}")
+        if e.pinned:
+            # pinned position/size is never grid-derived (decode skips it and
+            # keeps the exact original x,y,w,d) — so l/fw here must be the
+            # tightest grid box that fully CONTAINS the real footprint
+            # (floor the low edge, ceil the high edge independently), not
+            # floor(real_left) combined with a separately-rounded ceil(w) —
+            # those two roundings don't compose to a containing box in
+            # general and could let a movable item sit closer than allowed.
+            l_val, r_val = _g_floor(e.x - e.w / 2, G), _g_ceil(e.x + e.w / 2, G)
+            b_val, t_val = _g_floor(e.y - e.d / 2, G), _g_ceil(e.y + e.d / 2, G)
+            fw, fd = r_val - l_val, t_val - b_val
+            model.Add(l == l_val)
+            model.Add(b == b_val)
+        else:
+            w_g, d_g = _g_ceil(e.w, G), _g_ceil(e.d, G)
+            rot = model.NewBoolVar(f"ROT_{e.tag}")
+            fw = model.NewIntVar(min(w_g, d_g), max(w_g, d_g), f"FW_{e.tag}")
+            fd = model.NewIntVar(min(w_g, d_g), max(w_g, d_g), f"FD_{e.tag}")
+            model.Add(fw == w_g + rot * (d_g - w_g))
+            model.Add(fd == d_g + rot * (w_g - d_g))
+            ROT[e.tag] = rot
+            model.Add(l + fw <= site_w)
+            model.Add(b + fd <= site_d)
+        L[e.tag], B[e.tag], FW[e.tag], FD[e.tag] = l, b, fw, fd
+        for i, (lo, hi) in enumerate(racks):
+            _cpsat_avoid_band(model, b, b + fd, lo, hi, f"rack{i}_{e.tag}")
+        for i, box in enumerate(kboxes):
+            _cpsat_no_overlap(model, (l, b, l + fw, b + fd), box, 0, f"keep{i}_{e.tag}")
+
+    for i in range(len(eq)):
+        for j in range(i + 1, len(eq)):
+            ei, ej = eq[i], eq[j]
+            gap = _g_ceil(min_gap(ei.cls, ej.cls, spacing) + CPSAT_EPS_M, G)
+            a = (L[ei.tag], B[ei.tag], L[ei.tag] + FW[ei.tag], B[ei.tag] + FD[ei.tag])
+            b = (L[ej.tag], B[ej.tag], L[ej.tag] + FW[ej.tag], B[ej.tag] + FD[ej.tag])
+            _cpsat_no_overlap(model, a, b, gap, f"sp{i}_{j}")
+
+    # tube-pull clearance: swept rectangle vs site bounds/racks/keepouts/every other footprint
+    for e in eq:
+        if not e.pull_side or e.pull_len <= 0:
+            continue
+        l, b, fw, fd = L[e.tag], B[e.tag], FW[e.tag], FD[e.tag]
+        length = _g_ceil(e.pull_len, G)
+        pr = {
+            "x+": (l + fw, b, l + fw + length, b + fd),
+            "x-": (l - length, b, l, b + fd),
+            "y+": (l, b + fd, l + fw, b + fd + length),
+            "y-": (l, b - length, l + fw, b),
+        }.get(e.pull_side.strip())
+        if pr is None:
+            continue
+        px1, py1, px2, py2 = pr
+        model.Add(px1 >= 0); model.Add(px2 <= site_w)
+        model.Add(py1 >= 0); model.Add(py2 <= site_d)
+        for i, (lo, hi) in enumerate(racks):
+            _cpsat_avoid_band(model, py1, py2, lo, hi, f"pullrack{i}_{e.tag}")
+        for i, box in enumerate(kboxes):
+            _cpsat_no_overlap(model, pr, box, 0, f"pullkeep{i}_{e.tag}")
+        for other in eq:
+            if other is e:
+                continue
+            ob = (L[other.tag], B[other.tag], L[other.tag] + FW[other.tag], B[other.tag] + FD[other.tag])
+            _cpsat_no_overlap(model, pr, ob, 0, f"pull_{e.tag}_{other.tag}")
+
+    # prevailing wind: fired heater's upwind rectangle vs every other footprint
+    if site.wind_dir:
+        wind_len = _g_ceil(WIND_CLEARANCE_M, G)
+        for e in eq:
+            if e.cls != "fired_heater":
+                continue
+            l, b, fw, fd = L[e.tag], B[e.tag], FW[e.tag], FD[e.tag]
+            wr = {
+                "x+": (l + fw, b, l + fw + wind_len, b + fd),
+                "x-": (l - wind_len, b, l, b + fd),
+                "y+": (l, b + fd, l + fw, b + fd + wind_len),
+                "y-": (l, b - wind_len, l + fw, b),
+            }.get(site.wind_dir.strip())
+            if wr is None:
+                continue
+            for other in eq:
+                if other is e:
+                    continue
+                ob = (L[other.tag], B[other.tag], L[other.tag] + FW[other.tag], B[other.tag] + FD[other.tag])
+                _cpsat_no_overlap(model, wr, ob, 0, f"wind_{e.tag}_{other.tag}")
+
+    # objective: pipe rise+run+drop, weight scaled to an integer (CP-SAT is integer-only)
+    site_d2 = 2 * site_d
+    cx2 = {tag: 2 * L[tag] + FW[tag] for tag in L}
+    cy2 = {tag: 2 * B[tag] + FD[tag] for tag in L}
+    rack_y2 = [round(2 * ry / G) for ry, _ in site.racks]
+    terms = []
+    for idx, (a_tag, b_tag, weight) in enumerate(conns):
+        run = model.NewIntVar(0, 2 * site_w, f"run{idx}")
+        model.Add(run >= cx2[a_tag] - cx2[b_tag])
+        model.Add(run >= cx2[b_tag] - cx2[a_tag])
+        rise = model.NewIntVar(0, site_d2, f"rise{idx}")
+        drop = model.NewIntVar(0, site_d2, f"drop{idx}")
+        choose = [model.NewBoolVar(f"choose{idx}_{k}") for k in range(len(site.racks))]
+        model.Add(sum(choose) == 1)
+        for k, ry2 in enumerate(rack_y2):
+            model.Add(rise >= cy2[a_tag] - ry2).OnlyEnforceIf(choose[k])
+            model.Add(rise >= ry2 - cy2[a_tag]).OnlyEnforceIf(choose[k])
+            model.Add(drop >= cy2[b_tag] - ry2).OnlyEnforceIf(choose[k])
+            model.Add(drop >= ry2 - cy2[b_tag]).OnlyEnforceIf(choose[k])
+        terms.append(round(weight * 100) * (run + rise + drop))
+    model.Minimize(sum(terms))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit_s
+    solver.parameters.num_search_workers = 8
+    solver.parameters.random_seed = seed
+    status = solver.Solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        raise RuntimeError("CP-SAT found no feasible layout within the time limit")
+
+    for e in eq:
+        if e.pinned:
+            continue  # exact pinned position/size, never derived from the grid
+        rotated = solver.Value(ROT[e.tag])
+        w, d = (e.d, e.w) if rotated else (e.w, e.d)
+        x = solver.Value(L[e.tag]) * G + w / 2
+        y = solver.Value(B[e.tag]) * G + d / 2
+        e.x, e.y, e.w, e.d = x, y, w, d
+    return piping_cost(eq, conns, site)
+
 # --------------------------------------------------------------- DXF writer
 # ponytail: hand-rolled DXF R12 (plain text) — ezdxf not needed for lines+text.
 
@@ -484,7 +718,16 @@ def solve_ranked(data_dir: str, seeds):
     for seed in seeds:
         eq, conns, spacing, site, keepouts = load_unit(data_dir)
         pinned_before = [(e.tag, e.x, e.y) for e in eq if e.pinned]
-        cost = solve(eq, conns, site, spacing, keepouts, seed=seed)
+        # ponytail: item 11's gate, measured — see CLAUDE.md self-learning.
+        # random_place()'s scatter-then-reject init starts failing outright
+        # above CPSAT_THRESHOLD movable items even on a generously sized
+        # site, so CP-SAT (builds a feasible layout by construction) takes
+        # over there instead of SA.
+        movable = sum(1 for e in eq if not e.pinned)
+        if movable > CPSAT_THRESHOLD:
+            cost = solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed)
+        else:
+            cost = solve(eq, conns, site, spacing, keepouts, seed=seed)
         _check(eq, site, spacing, keepouts, pinned_before)
         results.append((seed, cost))
         if best is None or cost < best[0]:

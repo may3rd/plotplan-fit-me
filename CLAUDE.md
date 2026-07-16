@@ -274,3 +274,57 @@ Format: `- [date] finding — why it matters`
   `preview_start`/the Browser pane for the Vite frontend, which worked
   fine from launch.json. If that error recurs, don't keep retrying
   preview_start with path tweaks — go straight to Bash.
+- [2026-07-16] Item 11's gate ("only if SA stalls on >30 items") tested with
+  a synthetic unit generator (scratchpad, not committed — realistic class
+  mix matching sample_unit's proportions: heaters rare, exchangers/pumps
+  dominant, since fired_heater's 15m omnidirectional spacing is what breaks
+  small sites, not equipment count alone). Confirmed the gate is true:
+  `random_place()`'s pure-random-scatter-then-reject-infeasible init starts
+  failing outright around N=27-30 even on a site sized ~4x more generously
+  (by area ratio) than sample_unit's — and even there, 1 of 8 seeds still
+  hit the `RuntimeError` at N=30. Where init did succeed, full `solve()`
+  (60000 iters, unchanged from N=8) took ~8s/seed vs ~3.8s/seed at N=8, and
+  cross-seed score spread widened to ~25% (5003-6242) vs sample_unit's
+  ~16% (394-457) — same iteration budget spread over more variables
+  converges less reliably, not just slower. Net: item 11 is justified, not
+  speculative — the failure mode is really in `random_place()`'s
+  initialization strategy (probability of an all-N-item-feasible random
+  scatter collapses combinatorially), which a CP-SAT/MILP replacement would
+  sidestep entirely by construction. Have not yet implemented it — next
+  step if asked is either replace just the init (seed SA from a
+  constructive/greedy placement instead of pure random) or the full
+  OR-tools swap PLAN.md item 11 describes.
+- [2026-07-16] Item 11 (CP-SAT/MILP) implemented. `solve_cpsat()` mirrors
+  `feasible()`'s constraint set (bounds/racks/keepouts/spacing/pull/wind/
+  pinned) as CP-SAT linear/disjunctive constraints on a `CPSAT_GRID_M`
+  (0.5m) grid, dispatched from `solve_ranked()` automatically once movable
+  count exceeds `CPSAT_THRESHOLD` (30) — `solve()`/SA is untouched below
+  that, `backend/api.py` needed zero changes since it only calls
+  `solve_ranked()`. Two correctness traps hit and fixed during
+  implementation, worth knowing before touching this function again:
+  (1) pinned equipment's grid box can't be `floor(left)` combined with a
+  separately-`ceil`'d width — those two roundings don't compose into a box
+  that's guaranteed to *contain* the real footprint; had to compute
+  `floor(real_left)` and `ceil(real_right)` independently and take the
+  difference as the grid width. (2) CP-SAT's non-strict `<=`/`>=`
+  constraints let it place solutions exactly touching a clearance boundary,
+  which floating-point noise can then flip to a violation once decoded to
+  real meters and re-checked by `feasible()`'s strict `<`; fixed by padding
+  every required-minimum conversion (pairwise gap, rack half-width) with
+  `CPSAT_EPS_M` (1cm) before rounding, so decoded solutions clear the real
+  check with margin instead of landing exactly on its float boundary.
+  Zero-margin checks (pull clearance, wind — plain non-overlap, no minimum
+  distance) don't need this, only the ones with an actual required-distance
+  threshold do. The objective deliberately does NOT include the rack-steel-
+  span term from `piping_cost()` (needs conditional min/max bookkeeping
+  across "items actually routed onto a used rack" that isn't worth exact-
+  modeling for a secondary cost term) — `solve_cpsat()` still *returns* the
+  true complete `piping_cost()` after decoding, so `run()`'s existing
+  cross-check assert holds regardless of which solver ran. Keep-out zones
+  are approximated as their bounding box in the CP-SAT model (exact for
+  every zone this repo's data actually has — all rectangles — an
+  overestimate of the exclusion for a hypothetical concave zone); same
+  ceiling as `_rect_hits_poly`'s existing documented approximation, not a
+  new one. `ortools` added to `backend/requirements.txt` — the one
+  dependency addition this repo's ponytail rules explicitly anticipate,
+  since the roadmap item itself names OR-Tools as the tool.
