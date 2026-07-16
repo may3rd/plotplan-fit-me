@@ -64,13 +64,56 @@ are placeholders.
 
 ### site.csv — required
 
-Exactly one data row, describing the site rectangle and its pipe rack.
+Describes the site rectangle and one or more pipe racks.
 
 | column | meaning |
 |---|---|
-| `w`, `d` | site extent in meters (x, y) |
-| `rack_y` | y-coordinate of the pipe rack's centerline |
-| `rack_half` | half-width of the rack corridor — equipment can't encroach within this + its own half-depth of the centerline |
+| `w`, `d` | site extent in meters (x, y) — only read from the first row |
+| `rack_y` | y-coordinate of a rack spine's centerline |
+| `rack_half` | half-width of that rack's corridor — equipment can't encroach within this + its own half-depth of the centerline |
+
+One row = one rack spine, same "grouped rows" idea as `keepouts.csv`. A
+single row is the original single-rack format, unchanged:
+
+```
+w,d,rack_y,rack_half
+90,60,30,4
+```
+
+For more than one rack (parallel spines), add a row per rack — leave `w,d`
+blank on the extra rows, they're ignored past the first:
+
+```
+w,d,rack_y,rack_half
+90,80,30,4
+,,70,4
+```
+
+Every connection routes via whichever rack gives it the shorter rise+drop
+(the run-along-x term doesn't depend on which rack, so it never affects the
+choice). Equipment can't encroach on *any* rack's corridor. Rack steel is
+also costed: for each rack actually used by at least one connection, its
+physical span (leftmost to rightmost x among the equipment routed onto it)
+is added to the score at `RACK_STEEL_COST_PER_M` (a module constant in
+`plotplan.py`, same units as piping weight×length) — more racks means more
+steel to pay for, not a free lunch.
+
+An optional `wind_dir` column (only read from the first row, like `w`/`d`)
+sets the prevailing wind direction — `x+`, `x-`, `y+`, or `y-`, the side the
+wind blows *from* (the upwind side of every fired heater). No equipment may
+sit within `WIND_CLEARANCE_M` (a module constant in `plotplan.py`) of that
+side of any `fired_heater`-class item — a hydrocarbon release there would
+blow straight into the open flame. Leave the column blank or omit it for no
+wind constraint (the original behavior):
+
+```
+w,d,rack_y,rack_half,wind_dir
+90,80,30,4,x+
+,,70,4,
+```
+
+That says wind blows from the east (`x+`): nothing may sit east of a fired
+heater within the clearance distance.
 
 ### keepouts.csv — optional
 
@@ -228,13 +271,33 @@ This is also present on E-102 in `data/sample_unit/equipment.csv`.
 
 ---
 
+## Use case 7: prevailing wind constraint
+
+Add `wind_dir` to `site.csv` to keep equipment out of a fired heater's
+upwind side:
+
+```
+w,d,rack_y,rack_half,wind_dir
+90,80,30,4,x+
+```
+
+Wind blows from the east (`x+`) here, so no equipment may sit within
+`WIND_CLEARANCE_M` east of any `fired_heater`-class item. Leave the column
+blank for no wind constraint.
+
+This is also present in `data/sample_unit/site.csv` (heater H-101, wind
+from `x+`).
+
+---
+
 ## Reading the outputs
 
 ### plotplan.dxf
 
 Layers: `SITE` (boundary), `RACK` (pipe rack corridor), `EQUIPMENT` +
 `TAGS` (footprints and labels), `KEEPOUT`/`ROADS`/`MAINT` (exclusion zones,
-split by name prefix), `PULL` (tube-pull/maintenance swept rectangles).
+split by name prefix), `PULL` (tube-pull/maintenance swept rectangles),
+`WIND` (fired heater upwind exclusion sectors).
 
 ### plotplan_takeoff.csv
 
@@ -246,15 +309,19 @@ type,a,b,weight,length_m
 pipe,H-101,C-101,3,25.47
 pipe,C-101,E-101,2,21.09
 ...
-rack_span_used,,,,32.37
+rack_span_used,,y=30,,24.90
 total_pipe_length_m,,,,197.08
 ```
 
 - `pipe` rows: one per connection, with the rack-routed length (meters)
-  between those two tags at the final positions.
-- `rack_span_used`: the x-distance between the leftmost and rightmost
-  equipment — how much physical rack steel this layout actually needs
-  (not the full site width, which is usually more than what's used).
+  between those two tags at the final positions — each routed via whichever
+  rack spine is shortest for that connection.
+- `rack_span_used`: one row per rack actually used by at least one
+  connection, `b` identifying which rack (`y=<rack_y>`) and `length_m` the
+  x-distance between the leftmost and rightmost equipment routed onto it —
+  how much physical rack steel this layout actually needs (not the full
+  site width, which is usually more than what's used). A single-rack site
+  still gets exactly one such row.
 - `total_pipe_length_m`: sum of all `pipe` row lengths (unweighted — this
   is meters of pipe, not the piping cost score).
 

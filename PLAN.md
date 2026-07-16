@@ -95,13 +95,51 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
    manual sum of weight×length across all pipe rows matches the printed
    score (331 on sample_unit seed 2); single-seed and legacy (no
    pins/keepouts) data dirs both produce correct takeoff files.
-7. `[ ]` **Equipment rotation** — add a 90° rotation move to SA; swap w/d on
-   rotation; existing gap/cost math already consumes footprint, no other
-   change. *Effort: M.*
-8. `[ ]` **Multiple racks** — route each connection via its nearest rack
-   spine; add rack steel length to the cost function. *Effort: M/L.*
-9. `[ ]` **Prevailing wind constraint** — directional keep-out rule for fired
-   heaters (upwind-side only). *Effort: S.*
+7. `[x]` **Equipment rotation** — SA's move step now picks a 90° rotation
+   (swap `w`/`d` in place) 20% of the time instead of a translation, with the
+   same accept/reject/revert logic either way — `feasible()` already reads
+   `w`/`d` for bounds/gap/keepout/pull checks, so no other change was needed.
+   `best_pos` snapshots grew from `(x, y)` to `(x, y, w, d)` since the best
+   layout can now have items rotated. Verified: `_check()` (feasible, gaps,
+   keepouts, pull clearance, pinned-position) passes across seeds 0-7 on
+   sample_unit with no changes to `_check()` itself; pinned equipment never
+   rotates (excluded from `movable`, same as translation).
+8. `[x]` **Multiple racks** — `Site.rack_y`/`rack_half` became
+   `Site.racks: list[(rack_y, rack_half)]`; `site.csv` uses the same
+   "grouped rows" convention as `keepouts.csv` (one row per rack, `w`/`d`
+   only read from the first row) — a single-row file behaves exactly as
+   before. `feasible()` now rejects encroachment on *any* rack's corridor
+   (footprint and pull-clearance checks both loop over `site.racks`).
+   `piping_cost()` routes each connection via whichever rack minimizes
+   rise+drop (the run-along-x term is rack-independent, so it doesn't
+   affect the choice) and adds `RACK_STEEL_COST_PER_M ×` the physical span
+   of every rack actually used by >=1 connection — more racks isn't free,
+   the solver pays for the steel. `write_takeoff()` keeps its own
+   independent nearest-rack/length arithmetic (per item 6's
+   deliberate-divergence design) and now writes one `rack_span_used` row
+   per rack actually used, labeled `y=<rack_y>`, instead of a single
+   whole-site row. `sample_unit/site.csv` now has two racks (y=30, y=70;
+   site `d` bumped 60->80 for room) as the live example. Verified: manual
+   `piping_cost()` calls against hand-built two-rack sites confirm correct
+   nearest-rack selection and steel-span costing (tie case, asymmetric
+   case); `_check()` passes across seeds 0-8 on the updated sample_unit
+   with both rack corridors enforced simultaneously alongside existing
+   pinned/keepout/pull constraints.
+9. `[x]` **Prevailing wind constraint** — `Site` gained `wind_dir: str = ""`
+   (`"x+"/"x-"/"y+"/"y-"`, the side the wind blows *from*, same read-only-
+   first-row convention as `w`/`d`/racks). Reused the `_pull_rect` direction
+   dict rather than duplicating it: factored out `_side_rect(x1, y1, x2, y2,
+   side, length)`, and both `_pull_rect()` (per-item `pull_side`/`pull_len`)
+   and the new `_wind_rect()` (fixed `WIND_CLEARANCE_M`, only for
+   `cls == "fired_heater"`) call it. `feasible()`/`_check()` reject/flag any
+   other equipment footprint overlapping a heater's upwind rectangle — same
+   shape of check as the pull-clearance one, no new pattern. DXF gained a
+   `WIND` layer. `sample_unit/site.csv` now sets `wind_dir=x+` on H-101's
+   rack row as the live example. Verified: hand-built two-item feasibility
+   test confirms an item placed inside the upwind sector is rejected and
+   the same item placed elsewhere is accepted; `_check()` (including the
+   new wind assertion) passes across seeds 0-8 on sample_unit alongside all
+   prior constraints (pins, keepouts, multiple racks, pull clearance).
 10. `[ ]` **Web UI** — FastAPI backend wrapping the existing solver + a real
     React app in `frontend/` (drag equipment, live score). Gated: only start
     after the CLI has been run against a real unit **and** the user

@@ -195,3 +195,49 @@ Format: `- [date] finding — why it matters`
   implementations plus an assert that they agree is a better regression
   net than one shared function that could be wrong in a way that's
   invisible from either caller.
+- [2026-07-16] Item 7 (equipment rotation) done. No new `Equipment` field —
+  rotation is just `e.w, e.d = e.d, e.w` inside `solve()`'s move step (20%
+  of moves, coin-flipped alongside the existing translation move), since
+  `feasible()`/`_footprint()`/`_pull_rect()`/DXF/takeoff all already read
+  `w`/`d` directly and don't care how the item got that footprint. Only
+  ripple: `best_pos` snapshots in `solve()` grew from `(x, y)` to
+  `(x, y, w, d)` tuples so the best-found layout can preserve rotations.
+  `_check()` needed zero changes — its existing feasible/gap/keepout/pull
+  assertions already cover a rotated footprint. Pinned equipment is
+  excluded from `movable`, so it never rotates, matching how it already
+  never translates.
+- [2026-07-16] Item 8 (multiple racks) done. `Site.rack_y`/`rack_half`
+  (two scalar fields) became `Site.racks: list[(rack_y, rack_half)]` — grep
+  for `site.rack` before assuming a call site still has the old fields,
+  same caution as `load_unit()`'s and `best`'s past shape changes.
+  `site.csv` reuses the keepouts.csv "grouped rows" pattern: one row per
+  rack, `w`/`d` only read from row 0. `feasible()`'s rack-corridor checks
+  (both the plain footprint one and the pull-clearance one) became `any(...
+  for ry, rhalf in site.racks)` instead of a single comparison — loop over
+  every rack, not just check the nearest one, since equipment must clear
+  *all* corridors. `piping_cost()` now does two things per connection:
+  picks the rack minimizing rise+drop (an `min(..., key=...)` over
+  `site.racks`), and separately accumulates `RACK_STEEL_COST_PER_M ×` the
+  x-span of whichever equipment got routed onto each rack, so adding a
+  rack has a real cost, not just a free routing option. `write_takeoff()`
+  deliberately does NOT call the same rack-selection code as
+  `piping_cost()` — same reasoning as item 6, two independent
+  implementations plus `run()`'s existing total-cost assert catches drift
+  between them. `rack_span_used` takeoff rows changed shape: now one row
+  per rack in use, labeled `y=<rack_y>` in the `b` column, instead of one
+  whole-site row — any code reading that CSV by row-count/position instead
+  of `type` value would break.
+- [2026-07-16] Item 9 (prevailing wind) done. `Site.wind_dir` follows the
+  same "only read from the first CSV row" pattern as `w`/`d` — no new
+  loading mechanism. The one refactor: `_pull_rect()`'s x+/x-/y+/y-
+  direction dict got pulled out into `_side_rect(x1, y1, x2, y2, side,
+  length)` so the new `_wind_rect()` (heater-only, fixed
+  `WIND_CLEARANCE_M`) could reuse it instead of copy-pasting the same four
+  branches a second time — do the same if a third directional-rectangle
+  constraint shows up rather than writing a third copy. The wind check
+  itself is a straight copy of the pull-clearance check's shape
+  (rect-vs-every-other-footprint overlap) in both `feasible()` and
+  `_check()`, not factored further — the two clearance types have
+  different trigger conditions (per-item flag vs. per-class + site flag)
+  so a shared function would need parameters threading through both call
+  sites for marginal benefit.

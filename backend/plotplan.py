@@ -55,8 +55,22 @@ def min_gap(a: str, b: str, spacing: dict) -> float:
 class Site:
     w: float            # m, x extent (0..w)
     d: float            # m, y extent (0..d)
-    rack_y: float       # rack spine centerline
-    rack_half: float    # half-width of rack corridor (keep-out for equipment)
+    racks: list          # [(rack_y, rack_half), ...] — one or more parallel rack spines
+    wind_dir: str = ""   # "x+"/"x-"/"y+"/"y-" — the side the prevailing wind blows FROM
+                         # (upwind side of every fired_heater); "" = no wind constraint
+
+# ponytail: relative cost per meter of rack steel actually used (span of the
+# equipment routed onto that rack), same units as piping weight×length so it
+# trades off directly against pipe cost. Tune against a real $/m ratio if
+# this ever needs to match an actual estimate.
+RACK_STEEL_COST_PER_M = 1.0
+
+# ponytail: standoff distance (m) enforced on a fired heater's upwind side —
+# no other equipment may sit there, since prevailing wind would carry any
+# hydrocarbon release straight into the open flame. Placeholder magnitude
+# (bigger than the 15 m omnidirectional fired_heater spacing in
+# DEFAULT_SPACING); tune against a real wind-risk study if one exists.
+WIND_CLEARANCE_M = 20.0
 
 # connection: (tag_a, tag_b, weight). weight ~ n_lines * size factor,
 # i.e. relative installed-piping cost per meter of route.
@@ -91,9 +105,14 @@ def load_spacing(path: str) -> dict:
                 for r in csv.DictReader(f)}
 
 def load_site(path: str) -> Site:
+    # ponytail: same "grouped rows" convention as keepouts.csv — one row per
+    # rack spine. w/d/wind_dir only need to be present on the first row; a
+    # single-row file with no wind_dir column behaves exactly as before.
     with open(path, newline="") as f:
-        r = next(csv.DictReader(f))
-        return Site(float(r["w"]), float(r["d"]), float(r["rack_y"]), float(r["rack_half"]))
+        rows = list(csv.DictReader(f))
+    racks = [(float(r["rack_y"]), float(r["rack_half"])) for r in rows]
+    wind_dir = (rows[0].get("wind_dir") or "").strip()
+    return Site(float(rows[0]["w"]), float(rows[0]["d"]), racks, wind_dir)
 
 def load_keepouts(path: str) -> dict:
     """zone,x,y rows, grouped by zone name into ordered vertex lists."""
@@ -156,26 +175,37 @@ def _rect_overlap(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) -> bool:
 def _footprint(e: Equipment):
     return e.x - e.w / 2, e.y - e.d / 2, e.x + e.w / 2, e.y + e.d / 2
 
+def _side_rect(x1, y1, x2, y2, side: str, length: float):
+    """Rectangle of the given length extending outward from one side
+    ("x+"/"x-"/"y+"/"y-") of a footprint, or None if side/length is empty."""
+    if not side or length <= 0:
+        return None
+    return {
+        "x+": (x2, y1, x2 + length, y2),
+        "x-": (x1 - length, y1, x1, y2),
+        "y+": (x1, y2, x2, y2 + length),
+        "y-": (x1, y1 - length, x2, y1),
+    }.get(side)
+
 def _pull_rect(e: Equipment):
     """Tube-pull / maintenance clearance rectangle attached to one side of
     the footprint, or None if the item has no pull clearance defined."""
-    if not e.pull_side or e.pull_len <= 0:
+    return _side_rect(*_footprint(e), e.pull_side, e.pull_len)
+
+def _wind_rect(e: Equipment, wind_dir: str):
+    """Upwind exclusion rectangle for a fired heater, or None if this item
+    isn't a fired heater or the site has no wind_dir set."""
+    if e.cls != "fired_heater":
         return None
-    x1, y1, x2, y2 = _footprint(e)
-    return {
-        "x+": (x2, y1, x2 + e.pull_len, y2),
-        "x-": (x1 - e.pull_len, y1, x1, y2),
-        "y+": (x1, y2, x2, y2 + e.pull_len),
-        "y-": (x1, y1 - e.pull_len, x2, y1),
-    }.get(e.pull_side)
+    return _side_rect(*_footprint(e), wind_dir, WIND_CLEARANCE_M)
 
 def feasible(eq: list, site: Site, spacing: dict, keepouts: dict = None) -> bool:
     for e in eq:
         if not (e.w / 2 <= e.x <= site.w - e.w / 2 and
                 e.d / 2 <= e.y <= site.d - e.d / 2):
             return False
-        # keep-out: rack corridor
-        if abs(e.y - site.rack_y) < site.rack_half + e.d / 2:
+        # keep-out: every rack corridor
+        if any(abs(e.y - ry) < rhalf + e.d / 2 for ry, rhalf in site.racks):
             return False
         # keep-out: named polygon zones (flare radius, blast contours,
         # roads, maintenance corridors — all just zones in keepouts.csv)
@@ -198,7 +228,7 @@ def feasible(eq: list, site: Site, spacing: dict, keepouts: dict = None) -> bool
         x1, y1, x2, y2 = pr
         if not (0 <= x1 and x2 <= site.w and 0 <= y1 and y2 <= site.d):
             return False
-        if y1 < site.rack_y + site.rack_half and y2 > site.rack_y - site.rack_half:
+        if any(y1 < ry + rhalf and y2 > ry - rhalf for ry, rhalf in site.racks):
             return False
         for poly in (keepouts or {}).values():
             if _rect_hits_poly(x1, y1, x2, y2, poly):
@@ -209,16 +239,37 @@ def feasible(eq: list, site: Site, spacing: dict, keepouts: dict = None) -> bool
             ox1, oy1, ox2, oy2 = _footprint(other)
             if _rect_overlap(x1, y1, x2, y2, ox1, oy1, ox2, oy2):
                 return False
+    # prevailing wind: no equipment may sit in a fired heater's upwind
+    # sector — a hydrocarbon release there would blow straight into it.
+    if site.wind_dir:
+        for e in eq:
+            wr = _wind_rect(e, site.wind_dir)
+            if wr is None:
+                continue
+            wx1, wy1, wx2, wy2 = wr
+            for other in eq:
+                if other is e:
+                    continue
+                ox1, oy1, ox2, oy2 = _footprint(other)
+                if _rect_overlap(wx1, wy1, wx2, wy2, ox1, oy1, ox2, oy2):
+                    return False
     return True
 
 def piping_cost(eq: list, conns: list, site: Site) -> float:
-    # all lines route via the rack: rise to rack, run along, drop.
+    # all lines route via a rack: rise to the rack, run along, drop. Each
+    # connection picks whichever rack spine gives it the shortest rise+drop
+    # (the run-along-x term is the same regardless of which rack, so it
+    # doesn't affect the choice).
     by_tag = {e.tag: e for e in eq}
     total = 0.0
+    xs_by_rack = {}
     for a, b, w in conns:
         ea, eb = by_tag[a], by_tag[b]
-        total += w * (abs(ea.y - site.rack_y) + abs(ea.x - eb.x)
-                      + abs(eb.y - site.rack_y))
+        ry = min((r for r, _ in site.racks), key=lambda r: abs(ea.y - r) + abs(eb.y - r))
+        total += w * (abs(ea.y - ry) + abs(ea.x - eb.x) + abs(eb.y - ry))
+        xs_by_rack.setdefault(ry, []).extend([ea.x, eb.x])
+    # rack steel: only the racks actually used need physical span costed.
+    total += RACK_STEEL_COST_PER_M * sum(max(xs) - min(xs) for xs in xs_by_rack.values())
     return total
 
 # ------------------------------------------------------------------- solver
@@ -247,27 +298,39 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
         raise RuntimeError("no feasible initial layout — site too small for spacing table")
     cost = piping_cost(eq, conns, site)
     best = cost
-    best_pos = [(e.x, e.y) for e in eq]
+    best_pos = [(e.x, e.y, e.w, e.d) for e in eq]
     for k in range(iters):
         if not movable:
             break  # everything pinned — nothing left to optimize
         t = t0 * (t1 / t0) ** (k / iters)
         e = rng.choice(movable)
-        ox, oy = e.x, e.y
-        e.x = min(max(e.x + rng.gauss(0, t / 4 + 0.5), e.w / 2), site.w - e.w / 2)
-        e.y = min(max(e.y + rng.gauss(0, t / 4 + 0.5), e.d / 2), site.d - e.d / 2)
+        # ponytail: 20% of moves are a 90-degree rotation (swap w/d) instead
+        # of a translation — same accept/reject/revert logic either way,
+        # since feasible() already reads w/d for bounds/gap/keepout checks.
+        rotate = rng.random() < 0.2
+        if rotate:
+            e.w, e.d = e.d, e.w
+        else:
+            ox, oy = e.x, e.y
+            e.x = min(max(e.x + rng.gauss(0, t / 4 + 0.5), e.w / 2), site.w - e.w / 2)
+            e.y = min(max(e.y + rng.gauss(0, t / 4 + 0.5), e.d / 2), site.d - e.d / 2)
         if not feasible(eq, site, spacing, keepouts):
-            e.x, e.y = ox, oy
+            if rotate:
+                e.w, e.d = e.d, e.w
+            else:
+                e.x, e.y = ox, oy
             continue
         new = piping_cost(eq, conns, site)
         if new < cost or rng.random() < math.exp((cost - new) / t):
             cost = new
             if cost < best:
-                best, best_pos = cost, [(q.x, q.y) for q in eq]
+                best, best_pos = cost, [(q.x, q.y, q.w, q.d) for q in eq]
+        elif rotate:
+            e.w, e.d = e.d, e.w
         else:
             e.x, e.y = ox, oy
-    for e, (x, y) in zip(eq, best_pos):
-        e.x, e.y = x, y
+    for e, (x, y, w, d) in zip(eq, best_pos):
+        e.x, e.y, e.w, e.d = x, y, w, d
     return best
 
 # --------------------------------------------------------------- DXF writer
@@ -297,10 +360,12 @@ def write_dxf(path: str, eq: list, site: Site, keepouts: dict = None):
         for (x1, y1), (x2, y2) in [((0, 0), (site.w, 0)), ((site.w, 0), (site.w, site.d)),
                                    ((site.w, site.d), (0, site.d)), ((0, site.d), (0, 0))]:
             _line(f, x1, y1, x2, y2, "SITE")
-        # rack corridor
-        for y in (site.rack_y - site.rack_half, site.rack_y + site.rack_half):
-            _line(f, 0, y, site.w, y, "RACK")
-        _text(f, 1, site.rack_y - 0.6, 1.2, "PIPE RACK", "RACK")
+        # rack corridors
+        for i, (ry, rhalf) in enumerate(site.racks):
+            for y in (ry - rhalf, ry + rhalf):
+                _line(f, 0, y, site.w, y, "RACK")
+            label = "PIPE RACK" if len(site.racks) == 1 else f"PIPE RACK {i + 1}"
+            _text(f, 1, ry - 0.6, 1.2, label, "RACK")
         # keep-out / road / maintenance zones
         for zone, poly in (keepouts or {}).items():
             layer = _zone_layer(zone)
@@ -322,6 +387,13 @@ def write_dxf(path: str, eq: list, site: Site, keepouts: dict = None):
                 for (a, b), (c, d) in [((px1, py1), (px2, py1)), ((px2, py1), (px2, py2)),
                                        ((px2, py2), (px1, py2)), ((px1, py2), (px1, py1))]:
                     _line(f, a, b, c, d, "PULL")
+            wr = _wind_rect(e, site.wind_dir) if site.wind_dir else None
+            if wr is not None:
+                wx1, wy1, wx2, wy2 = wr
+                for (a, b), (c, d) in [((wx1, wy1), (wx2, wy1)), ((wx2, wy1), (wx2, wy2)),
+                                       ((wx2, wy2), (wx1, wy2)), ((wx1, wy2), (wx1, wy1))]:
+                    _line(f, a, b, c, d, "WIND")
+                _text(f, wx1, wy2 + 0.4, 1.0, "UPWIND", "WIND")
         f.write("0\nENDSEC\n0\nEOF\n")
 
 # ------------------------------------------------------------- takeoff CSV
@@ -331,21 +403,25 @@ def write_dxf(path: str, eq: list, site: Site, keepouts: dict = None):
 # thing that catches formula drift if these two ever disagree.
 
 def write_takeoff(path: str, eq: list, conns: list, site: Site) -> None:
-    """Write per-connection pipe length (m) plus rack span used and total
-    pipe length, in the sample format: type,a,b,weight,length_m."""
+    """Write per-connection pipe length (m), per-rack steel span actually
+    used, and total pipe length, in the sample format:
+    type,a,b,weight,length_m."""
     by_tag = {e.tag: e for e in eq}
     total_pipe_m = 0.0
+    xs_by_rack = {}
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["type", "a", "b", "weight", "length_m"])
         for a, b, weight in conns:
             ea, eb = by_tag[a], by_tag[b]
-            length = abs(ea.y - site.rack_y) + abs(ea.x - eb.x) + abs(eb.y - site.rack_y)
+            ry = min((r for r, _ in site.racks), key=lambda r: abs(ea.y - r) + abs(eb.y - r))
+            length = abs(ea.y - ry) + abs(ea.x - eb.x) + abs(eb.y - ry)
             w.writerow(["pipe", a, b, f"{weight:g}", f"{length:.2f}"])
             total_pipe_m += length
-        xs = [e.x for e in eq]
-        rack_span = (max(xs) - min(xs)) if xs else 0.0
-        w.writerow(["rack_span_used", "", "", "", f"{rack_span:.2f}"])
+            xs_by_rack.setdefault(ry, []).extend([ea.x, eb.x])
+        for ry in sorted(xs_by_rack):
+            span = max(xs_by_rack[ry]) - min(xs_by_rack[ry])
+            w.writerow(["rack_span_used", "", f"y={ry:g}", "", f"{span:.2f}"])
         w.writerow(["total_pipe_length_m", "", "", "", f"{total_pipe_m:.2f}"])
 
 # ------------------------------------------------------------------- runner
@@ -367,8 +443,8 @@ def _check(eq: list, site: Site, spacing: dict, keepouts: dict = None, pinned_be
         px1, py1, px2, py2 = pr
         assert 0 <= px1 and px2 <= site.w and 0 <= py1 and py2 <= site.d, \
             f"{e.tag} pull clearance extends outside site"
-        assert not (py1 < site.rack_y + site.rack_half and py2 > site.rack_y - site.rack_half), \
-            f"{e.tag} pull clearance crosses rack corridor"
+        assert not any(py1 < ry + rhalf and py2 > ry - rhalf for ry, rhalf in site.racks), \
+            f"{e.tag} pull clearance crosses a rack corridor"
         for zone, poly in (keepouts or {}).items():
             assert not _rect_hits_poly(px1, py1, px2, py2, poly), \
                 f"{e.tag} pull clearance overlaps keepout {zone}"
@@ -378,6 +454,18 @@ def _check(eq: list, site: Site, spacing: dict, keepouts: dict = None, pinned_be
             ox1, oy1, ox2, oy2 = _footprint(other)
             assert not _rect_overlap(px1, py1, px2, py2, ox1, oy1, ox2, oy2), \
                 f"{e.tag} pull clearance overlaps {other.tag}"
+    if site.wind_dir:
+        for e in eq:
+            wr = _wind_rect(e, site.wind_dir)
+            if wr is None:
+                continue
+            wx1, wy1, wx2, wy2 = wr
+            for other in eq:
+                if other is e:
+                    continue
+                ox1, oy1, ox2, oy2 = _footprint(other)
+                assert not _rect_overlap(wx1, wy1, wx2, wy2, ox1, oy1, ox2, oy2), \
+                    f"{other.tag} sits in {e.tag}'s upwind sector"
     if pinned_before:
         by_tag = {e.tag: e for e in eq}
         for tag, x, y in pinned_before:
