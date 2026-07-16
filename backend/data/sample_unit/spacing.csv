@@ -1,0 +1,16 @@
+cls_a,cls_b,min_gap
+fired_heater,fired_heater,15.0
+fired_heater,column,15.0
+fired_heater,vessel,15.0
+fired_heater,exchanger,15.0
+fired_heater,pump_hc,15.0
+column,column,3.0
+column,vessel,3.0
+column,exchanger,3.0
+column,pump_hc,5.0
+vessel,vessel,3.0
+vessel,exchanger,3.0
+vessel,pump_hc,5.0
+exchanger,exchanger,1.5
+exchanger,pump_hc,3.0
+pump_hc,pump_hc,1.5

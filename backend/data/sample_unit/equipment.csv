@@ -1,0 +1,9 @@
+tag,cls,w,d,x,y,pinned,pull_side,pull_len
+H-101,fired_heater,8,8,15,15,true,,
+C-101,column,6,6,,,false,,
+E-101,exchanger,5,2,,,false,,
+E-102,exchanger,5,2,,,false,x+,6
+V-101,vessel,4,3,,,false,,
+P-101,pump_hc,2,3,,,false,,
+P-102,pump_hc,2,3,,,false,,
+E-103,exchanger,5,2,,,false,,
