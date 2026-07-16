@@ -1,0 +1,89 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  font-family: system-ui, sans-serif;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid #ddd;
+}
+
+.score {
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.score.infeasible {
+  color: #c0392b;
+}
+
+.plot {
+  flex: 1;
+  width: 100%;
+  background: #f7f7f5;
+  touch-action: none;
+}
+
+.site {
+  fill: none;
+  stroke: #333;
+  stroke-width: 0.3;
+}
+
+.rack {
+  fill: #cfd8e3;
+  fill-opacity: 0.6;
+}
+
+.zone {
+  fill-opacity: 0.25;
+  stroke-width: 0.2;
+}
+
+.zone.keepout {
+  fill: #c0392b;
+  stroke: #c0392b;
+}
+
+.zone.road {
+  fill: #7f8c8d;
+  stroke: #7f8c8d;
+}
+
+.zone.maint {
+  fill: #f1c40f;
+  stroke: #f1c40f;
+}
+
+.conn {
+  stroke: #999;
+  stroke-width: 0.15;
+}
+
+.equip {
+  stroke: #222;
+  stroke-width: 0.2;
+  cursor: grab;
+}
+
+.equip.pinned {
+  cursor: not-allowed;
+  stroke-dasharray: 0.6 0.4;
+}
+
+.tag {
+  font-size: 1.6px;
+  text-anchor: middle;
+  fill: #222;
+  pointer-events: none;
+}
+
+.panel {
+  padding: 2rem;
+  font-family: system-ui, sans-serif;
+}

@@ -140,24 +140,53 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
    the same item placed elsewhere is accepted; `_check()` (including the
    new wind assertion) passes across seeds 0-8 on sample_unit alongside all
    prior constraints (pins, keepouts, multiple racks, pull clearance).
-10. `[ ]` **Web UI** — FastAPI backend wrapping the existing solver + a real
-    React app in `frontend/` (drag equipment, live score). Gated: only start
-    after the CLI has been run against a real unit **and** the user
-    explicitly asks for the web app — do not start this automatically just
-    because earlier items are done. *Effort: L.*
+10. `[x]` **Web UI** — started explicitly by the user ahead of the as-built
+    validation checkpoint (the gate was "run the CLI against a real unit
+    *and* be explicitly asked" — the user chose to skip straight to this
+    when asked which gated item to unblock). `backend/api.py`: stateless
+    FastAPI app, no database — a unit is always read fresh off its
+    `data/<name>/` CSVs via the existing `load_unit()`. `run()`'s
+    seed-ranking loop was refactored into `solve_ranked(data_dir, seeds) ->
+    (results, best)` (pure, no file writes) so the API could reuse the
+    exact same ranking/pinned-precheck/self-check logic instead of
+    duplicating that loop — `run()` now just calls `solve_ranked()` then
+    does its own printing/DXF/takeoff writing. Three endpoints: `GET
+    /api/units` (list data dirs), `GET /api/units/{name}` (equipment/
+    connections/site/keepouts as JSON), `POST /api/units/{name}/solve`
+    (runs `solve_ranked`, returns the winning layout), `POST
+    /api/units/{name}/score` (overlays caller-supplied x/y onto the loaded
+    equipment, returns `{feasible, cost}` — used for live drag feedback,
+    returns `cost: null` when infeasible since `piping_cost()` doesn't mean
+    anything for an infeasible layout). `frontend/`: Vite + React, no state
+    library, no UI kit, no canvas/chart dependency — one component, plain
+    SVG for the plot (site/racks/keepouts/connections/equipment, north-up
+    via a y-flip), native `fetch`, Vite dev-server proxy for `/api`.
+    Dragging a non-pinned item posts to `/score` on every move for live
+    feedback; pinned equipment (dashed outline) ignores drag. Solve button
+    calls `/solve` with the same seed/`a:b`-range syntax as the CLI.
+    Verified in-browser: unit loads and renders correctly (site, 2 rack
+    corridors, keep-out zone, all 8 equipment); Solve reproduces the CLI's
+    exact score (394 for seeds `0:8` on sample_unit); dragging an item into
+    a rack corridor, then a keep-out zone, then a fired-heater wind sector
+    each correctly flip the header to "infeasible layout" live, and
+    dragging to open space recovers a score; H-101 (pinned) doesn't move on
+    drag attempts. Not built: editing/saving CSVs from the UI, exporting
+    DXF/takeoff from the browser, or per-violation detail beyond the single
+    feasible/infeasible flag — see `frontend/README.md`'s "not built"
+    section.
 11. `[ ]` **CP-SAT / MILP solver** — OR-Tools, swapped in only if simulated
     annealing stalls on >30 equipment items. *Effort: L.*
 
 ## Non-goals (explicit, don't creep in)
 
 3D, ML, terrain/cut-fill, detailed pipe routing (that's a routing tool, not a
-plot plan tool), cost database integration, any `frontend/` scaffolding
-before item 10 is explicitly triggered.
+plot plan tool), cost database integration.
 
-## Validation checkpoint
+## Validation checkpoint (still outstanding)
 
-Before item 10 (web UI): run the CLI against one real as-built unit plot
-plan. Where the solver disagrees with the as-built, it's either a missing
-constraint (goes on this list) or a real saving (the pitch for the whole
-tool). Do this checkpoint even if it delays the roadmap — it's the only way
-to know if items 5–9 are the right five.
+Run the CLI against one real as-built unit plot plan. Where the solver
+disagrees with the as-built, it's either a missing constraint (goes on this
+list) or a real saving (the pitch for the whole tool). Item 10 shipped ahead
+of this checkpoint (the user chose to unblock it explicitly), so this is
+still worth doing — it's the only way to know if items 5–9 are the right
+five, independent of the web UI now existing.

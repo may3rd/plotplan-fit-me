@@ -17,22 +17,29 @@ See `README.md` for the feature list, `PLAN.md` for build order and status,
 ```
 plotplan-fit-me/
 ├── backend/
-│   ├── plotplan.py        solver + CLI — all active development happens here
+│   ├── plotplan.py        solver + CLI — the solver itself, still where
+│   │                      most constraint/scoring work happens
+│   ├── api.py             FastAPI app wrapping the solver for frontend/
+│   ├── requirements.txt   fastapi, uvicorn — install into backend/.venv
 │   ├── HELP.md            CSV format reference + simple use cases
 │   └── data/
 │       └── sample_unit/   equipment.csv, connections.csv, spacing.csv,
 │                          site.csv, keepouts.csv
-├── frontend/               placeholder only, see frontend/README.md
+├── frontend/               React + Vite UI, see frontend/README.md to run it
 ├── README.md
 ├── PLAN.md
 └── CLAUDE.md
 ```
 
-**Backend-first, hard rule.** Do not create `package.json`, scaffold a React
-app, or add any frontend framework files in `frontend/` unless the user
-explicitly asks for it in that session — not automatically when PLAN.md
-reaches item 10. If a task seems to require frontend work, stop and ask
-rather than scaffolding it.
+**Backend-first, historical note.** Item 10 (web UI) was gated behind an
+explicit user ask and a real-unit validation checkpoint; the user chose to
+unblock item 10 explicitly ahead of that checkpoint (still outstanding, see
+PLAN.md). The gate no longer applies — `frontend/` is a real Vite/React app
+now, not a placeholder. Any *further* frontend work (new pages, a build
+pipeline, a UI framework beyond plain React/SVG) should still get a quick
+sanity check with the user rather than assumed, since the original ask was
+scoped to "drag equipment, live score, Solve button" — not a general go-ahead
+for arbitrary frontend expansion.
 
 ## How to work in this repo
 
@@ -241,3 +248,29 @@ Format: `- [date] finding — why it matters`
   different trigger conditions (per-item flag vs. per-class + site flag)
   so a shared function would need parameters threading through both call
   sites for marginal benefit.
+- [2026-07-16] Item 10 (web UI) done, started explicitly by the user ahead
+  of the as-built validation checkpoint. `run()`'s seed-ranking loop got
+  pulled out into `solve_ranked(data_dir, seeds) -> (results, best)` (no
+  file writes) so `backend/api.py` could reuse it byte-for-byte instead of
+  re-implementing the loop — verified the CLI's printed scores are
+  unchanged after the refactor before writing any API code. `backend/.venv`
+  is a real venv (Homebrew's system Python is externally-managed and
+  refuses bare `pip install`) — `requirements.txt` has just `fastapi` +
+  `uvicorn[standard]`, nothing else. The `/score` endpoint intentionally
+  returns only `{feasible, cost}`, no per-violation detail — `feasible()`
+  returns a bare bool with no reason, and threading reasons through would
+  touch every check in `feasible()`; skipped for this pass, `cost: null`
+  when infeasible since `piping_cost()` is meaningless there.
+  `frontend/App.jsx` is deliberately one component: unit picker, an SVG
+  plot (native SVG, no canvas/chart lib — site/racks/keepouts/connections/
+  equipment, y-flipped for north-up), drag-to-score (posts to `/score` on
+  every pointermove, guards against out-of-order responses with a request-
+  id ref), and a Solve button hitting `/solve` with the same seed/`a:b`
+  syntax as the CLI. No state library, no UI kit — `useState` was enough.
+  One gotcha: `preview_start`'s own subprocess launcher failed for the
+  FastAPI backend ("getcwd: cannot access parent directories: Operation
+  not permitted") even with absolute paths in `.claude/launch.json` — ran
+  uvicorn directly via a backgrounded Bash command instead, and only used
+  `preview_start`/the Browser pane for the Vite frontend, which worked
+  fine from launch.json. If that error recurs, don't keep retrying
+  preview_start with path tweaks — go straight to Bash.

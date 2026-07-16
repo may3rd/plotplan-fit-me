@@ -7,20 +7,23 @@ Generates spacing-compliant 2D equipment layouts ranked by rack-routed piping co
 
 ```
 plotplan-fit-me/
-├── backend/          Python solver + CLI (active development)
+├── backend/          Python solver + CLI + FastAPI backend
 │   ├── plotplan.py
-│   ├── HELP.md        CSV format reference + simple use cases — start here
+│   ├── api.py          FastAPI app wrapping the solver (PLAN.md item 10)
+│   ├── HELP.md         CSV format reference + simple use cases — start here
 │   └── data/
 │       └── sample_unit/   equipment.csv, connections.csv, spacing.csv,
 │                          site.csv, keepouts.csv
-├── frontend/          placeholder only — no app yet, see frontend/README.md
+├── frontend/         React + Vite UI — drag equipment, live score, Solve
 ├── README.md          this file
 ├── PLAN.md            build order + status
 └── CLAUDE.md          working conventions + self-learning log
 ```
 
-Backend-first: the web app is not built until `PLAN.md` item 10, or until
-explicitly asked for sooner. All development right now is in `backend/`.
+The CLI and CSV workflow in `backend/` is still the primary way to run a
+real unit end-to-end (DXF + takeoff export); the web UI in `frontend/` is
+for interactively exploring/solving a layout in a browser — see
+`frontend/README.md` to run it.
 
 **New to the CSV files?** Read `backend/HELP.md` — it covers every column
 and walks through worked examples from a bare layout up to pinned
@@ -83,11 +86,14 @@ reference dataset: `backend/data/sample_unit/`.
 - **Self-check** — every result re-verified against the spacing matrix,
   keep-out zones, pull clearances, exact pinned position, and takeoff-vs-score
   consistency, by assert.
+- **Web UI** — FastAPI backend (`backend/api.py`) wrapping the solver +
+  React/Vite frontend: drag equipment with live feasibility/score feedback,
+  or click Solve to run the CLI's seed-ranking solver in the browser. See
+  `frontend/README.md`.
 
 ## Nice to have (see PLAN.md for build order)
 
-1. Web UI (FastAPI + canvas) — only when asked or when PLAN.md reaches it
-2. CP-SAT / MILP solver (only if SA stalls on >30 items)
+1. CP-SAT / MILP solver (only if SA stalls on >30 items)
 
 ## Non-goals for now
 

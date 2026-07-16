@@ -472,11 +472,13 @@ def _check(eq: list, site: Site, spacing: dict, keepouts: dict = None, pinned_be
             e = by_tag[tag]
             assert (e.x, e.y) == (x, y), f"pinned {tag} moved from ({x},{y}) to ({e.x},{e.y})"
 
-def run(data_dir: str, seeds, out_dxf="plotplan.dxf", out_takeoff="plotplan_takeoff.csv") -> list:
+def solve_ranked(data_dir: str, seeds):
     """Solve for each seed (fresh equipment copy per seed, since solve()
-    mutates positions in place). Prints a ranked score table, writes the
-    best layout to out_dxf and a pipe-meter/rack-span report to
-    out_takeoff. Returns [(seed, cost), ...] sorted by cost."""
+    mutates positions in place). Returns (results, best) where results is
+    [(seed, cost), ...] sorted by cost and best is
+    (cost, eq, conns, site, keepouts) for the winning seed. Shared by the
+    CLI (run(), below) and the web API — the ranking loop and its
+    pinned/self-check invariants live in exactly one place."""
     results = []
     best = None  # (cost, eq, conns, site, keepouts)
     for seed in seeds:
@@ -488,6 +490,13 @@ def run(data_dir: str, seeds, out_dxf="plotplan.dxf", out_takeoff="plotplan_take
         if best is None or cost < best[0]:
             best = (cost, eq, conns, site, keepouts)
     results.sort(key=lambda r: r[1])
+    return results, best
+
+def run(data_dir: str, seeds, out_dxf="plotplan.dxf", out_takeoff="plotplan_takeoff.csv") -> list:
+    """Prints a ranked score table, writes the best layout to out_dxf and a
+    pipe-meter/rack-span report to out_takeoff. Returns [(seed, cost), ...]
+    sorted by cost."""
+    results, best = solve_ranked(data_dir, seeds)
     if len(results) > 1:
         print("seed  score")
         for seed, cost in results:
