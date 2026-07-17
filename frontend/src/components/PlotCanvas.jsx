@@ -22,11 +22,13 @@ const CLASS_COLOR = {
 const RULER = 26 // px thickness of each ruler strip
 const RACK_HATCH_SPACING = 4 // meters between pipe-rack cross-tie lines
 const SOFT_SNAP_M = 1.0 // soft-snap to the site border when a dragged point is within this many meters
-// Maximum road-turn fillet radius, in meters. Fixed for now rather than
-// derived from road width — ponytail: promote to a per-project/user
-// setting if that turns out to matter, plain constant is enough today.
-// A corner rounds at whatever's smaller — this max, or whatever its
-// adjacent road stubs actually allow (see roundedPolygonPath).
+// Maximum INNER road-turn fillet radius, in meters (the tight notch on the
+// inside of a bend). Fixed for now rather than derived — ponytail: promote
+// to a per-project/user setting if it matters, plain constant is enough
+// today. The OUTER curb radius of a 90-degree turn is this plus the road's
+// own width (a car swings wide, so the outside arc is one lane bigger than
+// the inside). Either is capped by whatever its adjacent road stubs actually
+// allow (see roundedPolygonPath).
 const ROAD_INNER_RADIUS_M = 8
 const RACK_COLUMN_SIZE = 1.0 // meters, side length of the tiny column marker square
 
@@ -176,6 +178,30 @@ function clusterRoadZones(roadEntries) {
   return [...groups.values()]
 }
 
+// Two perpendicular roads joined by the two-click tool only reach each
+// other's centreline, so neither fills the corner square — the union comes
+// out stair-stepped (a notch on the outside of the bend) instead of a clean
+// right-angle. For every overlapping vertical/horizontal pair, add a "ghost"
+// rect covering the full corner (the vertical road's x-range × the horizontal
+// road's y-range) so the merged outline is one L that rounds to a single
+// inner + outer curve. A T/cross pair's ghost lands inside the through road,
+// so it changes nothing there.
+function withCornerFills(rects) {
+  const out = [...rects]
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i]; const b = rects[j]
+      const aVert = a.maxX - a.minX <= a.maxY - a.minY
+      const bVert = b.maxX - b.minX <= b.maxY - b.minY
+      if (aVert === bVert) continue // parallel-ish: no corner to complete
+      if (!(a.minX < b.maxX && b.minX < a.maxX && a.minY < b.maxY && b.minY < a.maxY)) continue
+      const v = aVert ? a : b; const h = aVert ? b : a
+      out.push({ minX: v.minX, maxX: v.maxX, minY: h.minY, maxY: h.maxY })
+    }
+  }
+  return out
+}
+
 // Union a cluster of axis-aligned rectangles into one rectilinear outline via
 // a grid trace: build the coordinate grid, mark filled cells, then collect
 // each filled cell's edges that border the outside (neighbor cell empty or
@@ -280,19 +306,42 @@ function roundedPolygonPath(poly, radii, toY) {
   return `${d}Z`
 }
 
-// A corner of the merged outline should round only if the merge actually
-// created it — a dead-end (the far tip of a road that meets nothing) is
-// always an exact corner of one of the original rectangles and must stay
-// exactly as drawn. A junction corner (both the outer curb-radius side AND
-// the inner notch side) is a NEW point the union introduces — its
-// coordinates mix one rect's edge with another's, so it never coincides
-// exactly with any original rectangle corner. That single test rounds both
-// sides of a real turn while leaving every dead-end untouched.
-function junctionCornerFlags(outline, rects, eps = 0.01) {
-  return outline.map((p) => !rects.some((r) => {
-    const corners = [[r.minX, r.minY], [r.minX, r.maxY], [r.maxX, r.minY], [r.maxX, r.maxY]]
-    return corners.some(([cx, cy]) => Math.abs(cx - p[0]) < eps && Math.abs(cy - p[1]) < eps)
-  }))
+// Which CONVEX corners are the outer curb-swing of a real bend (must round
+// wide) vs a dead-end cap that stays sharp. The outer swing of a 90° turn sits
+// diagonally across the corner square from the bend's concave inner notch —
+// exactly one road-width away on each axis. A dead-end cap has no notch paired
+// with it, so it fails the test and stays sharp. This is why the old "is this
+// a NEW union point?" test failed: the outer swing coincides with an original
+// rect corner, but it's still a genuine bend corner.
+// ponytail: assumes uniform road width, exact for this tool's roads; a bend
+// between two different-width roads would need per-axis widths, not one value.
+function outerSwingFlags(outline, convex, roadWidth, eps = 0.01) {
+  const notches = outline.filter((_, i) => !convex[i])
+  return outline.map((p, i) => convex[i] && notches.some((q) => (
+    Math.abs(Math.abs(p[0] - q[0]) - roadWidth) < eps
+    && Math.abs(Math.abs(p[1] - q[1]) - roadWidth) < eps
+  )))
+}
+
+// Which corners of the merged outline are convex (turn OUTWARD — the outer
+// curb of a bend) vs concave (the inner notch)? unionRoadOutline traces the
+// loop in a consistent winding, so a convex corner's turn cross-product has
+// the opposite sign to a concave one. Signed area tells us the winding.
+function convexCornerFlags(outline) {
+  const n = outline.length
+  let area2 = 0
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = outline[i]
+    const [bx, by] = outline[(i + 1) % n]
+    area2 += ax * by - bx * ay
+  }
+  const ccw = area2 > 0
+  return outline.map((p, i) => {
+    const a = outline[(i - 1 + n) % n]
+    const c = outline[(i + 1) % n]
+    const cross = (p[0] - a[0]) * (c[1] - p[1]) - (p[1] - a[1]) * (c[0] - p[0])
+    return ccw ? cross > 0 : cross < 0
+  })
 }
 
 // Tiny column markers for a pipe rack: one at each of the 4 corners, plus one
@@ -854,10 +903,20 @@ export default function PlotCanvas({
               zone polygons underneath for select/edit. */}
           {viewMode !== 'dxf' && roadClusters.filter((c) => c.length > 1).map((cluster, ci) => {
             const rects = cluster.map((r) => r.bbox)
-            const outline = unionRoadOutline(rects)
+            const outline = unionRoadOutline(withCornerFills(rects))
             if (outline.length < 3) return null
-            const junction = junctionCornerFlags(outline, rects)
-            const radii = junction.map((j) => (j ? ROAD_INNER_RADIUS_M : 0))
+            const convex = convexCornerFlags(outline)
+            // outer curb radius = inner + road width (narrowest segment in
+            // the cluster). A concave notch rounds tight (inner); the outer
+            // swing of a bend rounds wide (outer); dead-end caps stay sharp.
+            const roadWidth = Math.min(
+              ...cluster.map((r) => Math.min(r.bbox.maxX - r.bbox.minX, r.bbox.maxY - r.bbox.minY)),
+            )
+            const outerRadius = ROAD_INNER_RADIUS_M + roadWidth
+            const swing = outerSwingFlags(outline, convex, roadWidth)
+            const radii = outline.map((_, i) => (
+              convex[i] ? (swing[i] ? outerRadius : 0) : ROAD_INNER_RADIUS_M
+            ))
             return (
               <path
                 key={`road-merge-${ci}`}
