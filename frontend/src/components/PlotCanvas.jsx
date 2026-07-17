@@ -22,7 +22,12 @@ const CLASS_COLOR = {
 const RULER = 26 // px thickness of each ruler strip
 const RACK_HATCH_SPACING = 4 // meters between pipe-rack cross-tie lines
 const SOFT_SNAP_M = 1.0 // soft-snap to the site border when a dragged point is within this many meters
-const ROAD_CORNER_RADIUS_FACTOR = 1.0 // road corner fillet radius, as a multiple of the road's own width
+// Maximum road-turn fillet radius, in meters. Fixed for now rather than
+// derived from road width — ponytail: promote to a per-project/user
+// setting if that turns out to matter, plain constant is enough today.
+// A corner rounds at whatever's smaller — this max, or whatever its
+// adjacent road stubs actually allow (see roundedPolygonPath).
+const ROAD_INNER_RADIUS_M = 8
 const RACK_COLUMN_SIZE = 1.0 // meters, side length of the tiny column marker square
 
 // engineering-drawing dimension offsets (all in world meters)
@@ -229,17 +234,34 @@ function vscale(a, s) { return [a[0] * s, a[1] * s] }
 
 // SVG path `d` for a polygon with the flagged corners filleted: a straight
 // line in along one edge, a quadratic bezier through the true corner point,
-// then straight back out along the next edge. Corners with roundedFlags
-// false stay sharp, so a road with no junction renders identically to a
-// plain polygon just via a different element.
-function roundedPolygonPath(poly, roundedFlags, radius, toY) {
+// then straight back out along the next edge. `radii[i]` is the MAXIMUM
+// radius for corner i (0 = stays sharp), so a road with no junction (all
+// zeros) renders identically to a plain polygon just via a different
+// element.
+//
+// A corner rounds at whatever radius its adjacent road stubs actually allow,
+// clamped up to that maximum — never left sharp just because the full max
+// doesn't fit, but never overshooting past the road's own straight run either.
+//
+// Each edge can only be claimed by the fillets at its own two endpoints, so
+// a corner may use the FULL adjacent edge length when the far end of that
+// edge is a sharp (unrounded) corner — only half of it when both ends round,
+// so the two curves can't overlap. A road that joins another one flush at
+// its centerline (the normal two-click drawing convention) always has an
+// inner-notch edge exactly half the road's own width — that's often the
+// difference between a corner reaching the max radius and getting clamped.
+function roundedPolygonPath(poly, radii, toY) {
   const n = poly.length
   const corners = poly.map((p, i) => {
-    const prev = poly[(i - 1 + n) % n]
-    const next = poly[(i + 1) % n]
+    const prevIdx = (i - 1 + n) % n
+    const nextIdx = (i + 1) % n
+    const prev = poly[prevIdx]
+    const next = poly[nextIdx]
     const edgeIn = vlen(vsub(p, prev))
     const edgeOut = vlen(vsub(next, p))
-    const r = roundedFlags[i] ? Math.min(radius, edgeIn / 2, edgeOut / 2) : 0
+    const inShare = radii[prevIdx] > 1e-9 ? edgeIn / 2 : edgeIn
+    const outShare = radii[nextIdx] > 1e-9 ? edgeOut / 2 : edgeOut
+    const r = radii[i] > 1e-9 ? Math.min(radii[i], inShare, outShare) : 0
     const toPrev = edgeIn > 1e-6 ? vscale(vsub(prev, p), 1 / edgeIn) : [0, 0]
     const toNext = edgeOut > 1e-6 ? vscale(vsub(next, p), 1 / edgeOut) : [0, 0]
     return {
@@ -834,14 +856,12 @@ export default function PlotCanvas({
             const rects = cluster.map((r) => r.bbox)
             const outline = unionRoadOutline(rects)
             if (outline.length < 3) return null
-            const rounded = junctionCornerFlags(outline, rects)
-            const radius = Math.min(
-              ...cluster.map((r) => Math.min(r.bbox.maxX - r.bbox.minX, r.bbox.maxY - r.bbox.minY)),
-            ) * ROAD_CORNER_RADIUS_FACTOR
+            const junction = junctionCornerFlags(outline, rects)
+            const radii = junction.map((j) => (j ? ROAD_INNER_RADIUS_M : 0))
             return (
               <path
                 key={`road-merge-${ci}`}
-                d={roundedPolygonPath(outline, rounded, radius, toY)}
+                d={roundedPolygonPath(outline, radii, toY)}
                 className="zone-merge-outline"
               />
             )
