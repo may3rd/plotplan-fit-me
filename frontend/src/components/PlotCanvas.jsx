@@ -22,6 +22,8 @@ const CLASS_COLOR = {
 const RULER = 26 // px thickness of each ruler strip
 const RACK_HATCH_SPACING = 4 // meters between pipe-rack cross-tie lines
 const SOFT_SNAP_M = 1.0 // soft-snap to the site border when a dragged point is within this many meters
+const ROAD_CORNER_RADIUS_FACTOR = 1.0 // road corner fillet radius, as a multiple of the road's own width
+const RACK_COLUMN_SIZE = 1.0 // meters, side length of the tiny column marker square
 
 // engineering-drawing dimension offsets (all in world meters)
 const DIM_OFFSET = 3.0  // dimension line offset from the zone edge
@@ -134,6 +136,151 @@ function centerlineRect(start, end, width) {
   ]
 }
 
+function zoneBBox(poly) {
+  const xs = poly.map((p) => p[0])
+  const ys = poly.map((p) => p[1])
+  return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) }
+}
+
+function rectsOverlap(a, b, eps = 0.05) {
+  return a.minX <= b.maxX + eps && a.maxX >= b.minX - eps
+    && a.minY <= b.maxY + eps && a.maxY >= b.minY - eps
+}
+
+// Union-find clustering of road zones by rectangle overlap/touch, so a chain
+// of roads that connect end-to-end merges into one shape even where not
+// every pair directly overlaps (A touches B, B touches C -> one cluster).
+function clusterRoadZones(roadEntries) {
+  const n = roadEntries.length
+  const parent = Array.from({ length: n }, (_, i) => i)
+  const find = (x) => (parent[x] === x ? x : (parent[x] = find(parent[x])))
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (rectsOverlap(roadEntries[i].bbox, roadEntries[j].bbox)) {
+        const ri = find(i); const rj = find(j)
+        if (ri !== rj) parent[ri] = rj
+      }
+    }
+  }
+  const groups = new Map()
+  roadEntries.forEach((r, i) => {
+    const root = find(i)
+    if (!groups.has(root)) groups.set(root, [])
+    groups.get(root).push(r)
+  })
+  return [...groups.values()]
+}
+
+// Union a cluster of axis-aligned rectangles into one rectilinear outline via
+// a grid trace: build the coordinate grid, mark filled cells, then collect
+// each filled cell's edges that border the outside (neighbor cell empty or
+// off-grid) and link them tip-to-tail into a closed loop. Assumes a
+// simply-connected union (no donut holes) — true for how roads actually get
+// drawn here (a chain of overlapping segments, never a closed ring).
+function unionRoadOutline(rects) {
+  const xs = [...new Set(rects.flatMap((r) => [r.minX, r.maxX]))].sort((a, b) => a - b)
+  const ys = [...new Set(rects.flatMap((r) => [r.minY, r.maxY]))].sort((a, b) => a - b)
+  const nx = xs.length - 1
+  const ny = ys.length - 1
+  const filled = Array.from({ length: ny }, () => new Array(nx).fill(false))
+  for (let iy = 0; iy < ny; iy++) {
+    const cy = (ys[iy] + ys[iy + 1]) / 2
+    for (let ix = 0; ix < nx; ix++) {
+      const cx = (xs[ix] + xs[ix + 1]) / 2
+      filled[iy][ix] = rects.some((r) => cx > r.minX && cx < r.maxX && cy > r.minY && cy < r.maxY)
+    }
+  }
+  const edges = []
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      if (!filled[iy][ix]) continue
+      const x0 = xs[ix]; const x1 = xs[ix + 1]; const y0 = ys[iy]; const y1 = ys[iy + 1]
+      if (ix === 0 || !filled[iy][ix - 1]) edges.push([[x0, y0], [x0, y1]])
+      if (ix === nx - 1 || !filled[iy][ix + 1]) edges.push([[x1, y1], [x1, y0]])
+      if (iy === 0 || !filled[iy - 1][ix]) edges.push([[x1, y0], [x0, y0]])
+      if (iy === ny - 1 || !filled[iy + 1][ix]) edges.push([[x0, y1], [x1, y1]])
+    }
+  }
+  if (!edges.length) return []
+  const key = ([x, y]) => `${x.toFixed(4)},${y.toFixed(4)}`
+  const byStart = new Map(edges.map((e, i) => [key(e[0]), i]))
+  const used = new Array(edges.length).fill(false)
+  const loop = []
+  let cur = 0
+  for (let step = 0; step < edges.length; step++) {
+    used[cur] = true
+    loop.push(edges[cur][0])
+    const nextIdx = byStart.get(key(edges[cur][1]))
+    if (nextIdx === undefined || used[nextIdx]) break
+    cur = nextIdx
+  }
+  const n = loop.length
+  return loop.filter((p, i) => {
+    const prev = loop[(i - 1 + n) % n]; const next = loop[(i + 1) % n]
+    const sameX = prev[0] === p[0] && p[0] === next[0]
+    const sameY = prev[1] === p[1] && p[1] === next[1]
+    return !(sameX || sameY)
+  })
+}
+
+function vsub(a, b) { return [a[0] - b[0], a[1] - b[1]] }
+function vlen(a) { return Math.hypot(a[0], a[1]) }
+function vscale(a, s) { return [a[0] * s, a[1] * s] }
+
+// SVG path `d` for a polygon with the flagged corners filleted: a straight
+// line in along one edge, a quadratic bezier through the true corner point,
+// then straight back out along the next edge. Corners with roundedFlags
+// false stay sharp, so a road with no junction renders identically to a
+// plain polygon just via a different element.
+function roundedPolygonPath(poly, roundedFlags, radius, toY) {
+  const n = poly.length
+  const corners = poly.map((p, i) => {
+    const prev = poly[(i - 1 + n) % n]
+    const next = poly[(i + 1) % n]
+    const edgeIn = vlen(vsub(p, prev))
+    const edgeOut = vlen(vsub(next, p))
+    const r = roundedFlags[i] ? Math.min(radius, edgeIn / 2, edgeOut / 2) : 0
+    const toPrev = edgeIn > 1e-6 ? vscale(vsub(prev, p), 1 / edgeIn) : [0, 0]
+    const toNext = edgeOut > 1e-6 ? vscale(vsub(next, p), 1 / edgeOut) : [0, 0]
+    return {
+      inPt: [p[0] + toPrev[0] * r, p[1] + toPrev[1] * r],
+      corner: p,
+      outPt: [p[0] + toNext[0] * r, p[1] + toNext[1] * r],
+      rounded: r > 1e-6,
+    }
+  })
+  let d = ''
+  corners.forEach((c, i) => {
+    const start = c.rounded ? c.inPt : c.corner
+    d += `${i === 0 ? 'M' : 'L'} ${start[0]} ${toY(start[1])} `
+    if (c.rounded) d += `Q ${c.corner[0]} ${toY(c.corner[1])} ${c.outPt[0]} ${toY(c.outPt[1])} `
+  })
+  return `${d}Z`
+}
+
+// A corner of the merged outline should round only if the merge actually
+// created it — a dead-end (the far tip of a road that meets nothing) is
+// always an exact corner of one of the original rectangles and must stay
+// exactly as drawn. A junction corner (both the outer curb-radius side AND
+// the inner notch side) is a NEW point the union introduces — its
+// coordinates mix one rect's edge with another's, so it never coincides
+// exactly with any original rectangle corner. That single test rounds both
+// sides of a real turn while leaving every dead-end untouched.
+function junctionCornerFlags(outline, rects, eps = 0.01) {
+  return outline.map((p) => !rects.some((r) => {
+    const corners = [[r.minX, r.minY], [r.minX, r.maxY], [r.maxX, r.minY], [r.maxX, r.maxY]]
+    return corners.some(([cx, cy]) => Math.abs(cx - p[0]) < eps && Math.abs(cy - p[1]) < eps)
+  }))
+}
+
+// Tiny column markers for a pipe rack: one at each of the 4 corners, plus one
+// at each point where a cross-tie hatch line meets the rack's long edge.
+function rackColumnPoints(poly, hatch) {
+  const pts = [...poly]
+  hatch.forEach((seg) => pts.push([seg.x1, seg.y1], [seg.x2, seg.y2]))
+  return pts
+}
+
 export default function PlotCanvas({
   data, positions, onPositions, view, setView, showGrid, showRuler, gridStep, snap, tool, setTool,
   viewMode,
@@ -145,6 +292,20 @@ export default function PlotCanvas({
   const byTag = Object.fromEntries(equipment.map((e) => [e.tag, e]))
   const toY = (y) => site.d - y // north-up: flip y for SVG
   const spacingMap = useMemo(() => buildSpacingMap(spacing), [spacing])
+  // roads that overlap/touch get grouped so the whole chain renders as one
+  // merged, rounded-at-the-turns shape instead of separate rectangles with
+  // a visible seam at every join (see unionRoadOutline).
+  const roadClusters = useMemo(() => {
+    const roadEntries = Object.entries(keepouts ?? {})
+      .filter(([z]) => z.toUpperCase().startsWith('ROAD'))
+      .map(([zone, poly]) => ({ zone, poly, bbox: zoneBBox(poly) }))
+    return clusterRoadZones(roadEntries)
+  }, [keepouts])
+  const roadClusterSize = useMemo(() => {
+    const m = new Map()
+    roadClusters.forEach((cluster) => cluster.forEach((r) => m.set(r.zone, cluster.length)))
+    return m
+  }, [roadClusters])
 
   // roads and pipe racks share the exact same two-click centerline+width
   // draw interaction (see DRAW_PREFIX) — only the width preference, zone
@@ -595,16 +756,31 @@ export default function PlotCanvas({
             const [cx, cy] = centroid(poly)
             const hatch = kind === 'rack' ? rackHatchSegments(poly, RACK_HATCH_SPACING) : []
             const selected = selectedZone === zone
+            // a road that's part of a multi-segment merged cluster (see
+            // roadClusters) drops its own stroke — the merged outline drawn
+            // after this loop supplies the (rounded) boundary line instead,
+            // so no seam shows at the join. Real DXF export never merges
+            // (each zone is its own separate LINE outline), so skip this in
+            // DXF view and keep every road's true individual boundary.
+            const quiet = kind === 'road' && viewMode !== 'dxf' && (roadClusterSize.get(zone) ?? 1) > 1
             return (
               <g key={zone}>
                 <polygon
                   points={poly.map(([x, y]) => `${x},${toY(y)}`).join(' ')}
-                  className={`zone ${kind} ${selected ? 'selected' : ''}`}
+                  className={`zone ${kind} ${quiet ? 'merged-quiet' : ''} ${selected ? 'selected' : ''}`}
                   onPointerDown={(ev) => onPointerDownZone(zone, ev)}
                   onDoubleClick={(ev) => onDoubleClickZone(zone, ev)}
                 />
                 {viewMode !== 'dxf' && hatch.map((l, i) => (
                   <line key={i} x1={l.x1} y1={toY(l.y1)} x2={l.x2} y2={toY(l.y2)} className="rack-hatch" />
+                ))}
+                {viewMode !== 'dxf' && kind === 'rack' && rackColumnPoints(poly, hatch).map(([x, y], i) => (
+                  <rect
+                    key={`col${i}`}
+                    x={x - RACK_COLUMN_SIZE / 2} y={toY(y) - RACK_COLUMN_SIZE / 2}
+                    width={RACK_COLUMN_SIZE} height={RACK_COLUMN_SIZE}
+                    className="rack-column"
+                  />
                 ))}
                 {viewMode === 'dxf' ? (
                   // real DXF export labels every zone with its own name, not a
@@ -646,6 +822,28 @@ export default function PlotCanvas({
                   )
                 })}
               </g>
+            )
+          })}
+
+          {/* one rounded outline per merged road cluster, drawn on top of the
+              (now stroke-less) individual segments so the join reads as a
+              single continuous road with a curb-radius turn, not a seam.
+              pointer-events: none via CSS — clicks still hit the individual
+              zone polygons underneath for select/edit. */}
+          {viewMode !== 'dxf' && roadClusters.filter((c) => c.length > 1).map((cluster, ci) => {
+            const rects = cluster.map((r) => r.bbox)
+            const outline = unionRoadOutline(rects)
+            if (outline.length < 3) return null
+            const rounded = junctionCornerFlags(outline, rects)
+            const radius = Math.min(
+              ...cluster.map((r) => Math.min(r.bbox.maxX - r.bbox.minX, r.bbox.maxY - r.bbox.minY)),
+            ) * ROAD_CORNER_RADIUS_FACTOR
+            return (
+              <path
+                key={`road-merge-${ci}`}
+                d={roundedPolygonPath(outline, rounded, radius, toY)}
+                className="zone-merge-outline"
+              />
             )
           })}
 

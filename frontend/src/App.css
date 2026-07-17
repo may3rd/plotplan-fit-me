@@ -316,6 +316,17 @@
   pointer-events: none;
 }
 
+/* tiny column markers at each rack corner + cross-tie meeting point —
+   outlined, white-filled square (not solid), like a structural column
+   symbol drawn over the rack fill/hatch rather than a solid blob. */
+.rack-column {
+  fill: #fff;
+  stroke: #4a8f52;
+  stroke-width: 0.6;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
 .plot[data-tool='edit'] .zone {
   cursor: move;
 }
@@ -341,6 +352,26 @@
 .zone.road {
   fill: #7f8c8d;
   stroke: #7f8c8d;
+}
+
+/* a road that's part of a merged cluster (see roadClusters in PlotCanvas)
+   loses its own stroke so no per-segment seam line shows; the merged
+   outline drawn on top supplies the boundary instead. Still shows its own
+   outline while actively selected, so editing that segment stays precise. */
+.zone.road.merged-quiet {
+  stroke: none;
+}
+
+.zone.road.merged-quiet.selected {
+  stroke: #2563eb;
+}
+
+.zone-merge-outline {
+  fill: none;
+  stroke: #7f8c8d;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
 }
 
 .zone.maint {
