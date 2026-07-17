@@ -355,19 +355,28 @@
 }
 
 /* a road that's part of a merged cluster (see roadClusters in PlotCanvas)
-   loses its own stroke so no per-segment seam line shows; the merged
-   outline drawn on top supplies the boundary instead. Still shows its own
-   outline while actively selected, so editing that segment stays precise. */
+   renders invisible — the merged outline drawn on top supplies the fill AND
+   the (rounded) boundary for the whole cluster instead, so no seam shows at
+   the join and the rounded corner is filled with road color, not left as a
+   blank notch. pointer-events stays on so it's still a valid click/edit
+   target under the invisible shape. Still shows its own true rectangle
+   while actively selected, so editing that segment stays precise. */
 .zone.road.merged-quiet {
+  fill: none;
   stroke: none;
+  pointer-events: all;
 }
 
 .zone.road.merged-quiet.selected {
+  fill: #7f8c8d;
   stroke: #2563eb;
+  stroke-width: 2.5;
+  stroke-dasharray: 2 1;
 }
 
 .zone-merge-outline {
-  fill: none;
+  fill: #7f8c8d;
+  fill-opacity: 0.25;
   stroke: #7f8c8d;
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
