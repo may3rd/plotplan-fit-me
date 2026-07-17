@@ -313,13 +313,16 @@ function roundedPolygonPath(poly, radii, toY) {
 // with it, so it fails the test and stays sharp. This is why the old "is this
 // a NEW union point?" test failed: the outer swing coincides with an original
 // rect corner, but it's still a genuine bend corner.
-// ponytail: assumes uniform road width, exact for this tool's roads; a bend
-// between two different-width roads would need per-axis widths, not one value.
-function outerSwingFlags(outline, convex, roadWidth, eps = 0.01) {
+// The corner square between two roads is (vertical road width) × (horizontal
+// road width), so the swing/notch diagonal offsets equal those two widths —
+// which differ when the roads differ. Test each axis offset against the set of
+// road widths in the cluster, not one shared value, so a wide-meets-narrow
+// bend still rounds.
+function outerSwingFlags(outline, convex, widths, eps = 0.01) {
   const notches = outline.filter((_, i) => !convex[i])
+  const isWidth = (d) => widths.some((w) => Math.abs(d - w) < eps)
   return outline.map((p, i) => convex[i] && notches.some((q) => (
-    Math.abs(Math.abs(p[0] - q[0]) - roadWidth) < eps
-    && Math.abs(Math.abs(p[1] - q[1]) - roadWidth) < eps
+    isWidth(Math.abs(p[0] - q[0])) && isWidth(Math.abs(p[1] - q[1]))
   )))
 }
 
@@ -909,11 +912,9 @@ export default function PlotCanvas({
             // outer curb radius = inner + road width (narrowest segment in
             // the cluster). A concave notch rounds tight (inner); the outer
             // swing of a bend rounds wide (outer); dead-end caps stay sharp.
-            const roadWidth = Math.min(
-              ...cluster.map((r) => Math.min(r.bbox.maxX - r.bbox.minX, r.bbox.maxY - r.bbox.minY)),
-            )
-            const outerRadius = ROAD_INNER_RADIUS_M + roadWidth
-            const swing = outerSwingFlags(outline, convex, roadWidth)
+            const widths = cluster.map((r) => Math.min(r.bbox.maxX - r.bbox.minX, r.bbox.maxY - r.bbox.minY))
+            const outerRadius = ROAD_INNER_RADIUS_M + Math.min(...widths)
+            const swing = outerSwingFlags(outline, convex, widths)
             const radii = outline.map((_, i) => (
               convex[i] ? (swing[i] ? outerRadius : 0) : ROAD_INNER_RADIUS_M
             ))
