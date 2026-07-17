@@ -23,6 +23,12 @@ const RULER = 26 // px thickness of each ruler strip
 const RACK_HATCH_SPACING = 4 // meters between pipe-rack cross-tie lines
 const SOFT_SNAP_M = 1.0 // soft-snap to the site border when a dragged point is within this many meters
 
+// engineering-drawing dimension offsets (all in world meters)
+const DIM_OFFSET = 3.0  // dimension line offset from the zone edge
+const EXT_GAP = 0.5     // gap from zone corner to extension-line start
+const EXT_OVER = 1.0    // extension-line overshoot past the dimension line
+const ARROW = 1.2       // arrowhead open-angle size
+
 // Soft-snap a world coordinate to the nearest site border (0 or the site's
 // extent on that axis) when it's within SOFT_SNAP_M, otherwise leave it. Used
 // while dragging/resizing zones so a side can drop flush against the site edge.
@@ -699,13 +705,50 @@ export default function PlotCanvas({
             )
           })()}
 
-          {zoneDim && (
-            <g className="zone-dim">
-              <text x={zoneDim.cx} y={toY(zoneDim.cy) - 1.4} className="zone-dim-label">
-                {fmtM(zoneDim.w)} × {fmtM(zoneDim.h)} m
-              </text>
-            </g>
-          )}
+          {zoneDim && (() => {
+            // Engineering-drawing dimensions: extension/guide lines from the
+            // zone corners, dimension lines outside the zone with arrowheads,
+            // value text breaking each dimension line. Width is dimensioned
+            // along the top (and bottom), height along the left (and right).
+            const { cx, cy, w, h } = zoneDim
+            const x1 = cx - w / 2, x2 = cx + w / 2
+            const y1 = cy - h / 2, y2 = cy + h / 2
+            const dimTop = toY(y2) + DIM_OFFSET
+            const dimBot = toY(y1) - DIM_OFFSET
+            const dimLeft = x1 - DIM_OFFSET
+            const dimRight = x2 + DIM_OFFSET
+            const wTxt = `${fmtM(w)} m`
+            const hTxt = `${fmtM(h)} m`
+            const extYTop = [toY(y2) + EXT_GAP, dimTop + EXT_OVER]
+            const extYBot = [toY(y1) - EXT_GAP, dimBot - EXT_OVER]
+            const extXLeft = [x1 - EXT_GAP, dimLeft - EXT_OVER]
+            const extXRight = [x2 + EXT_GAP, dimRight + EXT_OVER]
+            return (
+              <g className="zone-dim">
+                {/* width: top dimension */}
+                <line x1={x1} y1={extYTop[0]} x2={x1} y2={extYTop[1]} className="dim-ext" />
+                <line x1={x2} y1={extYTop[0]} x2={x2} y2={extYTop[1]} className="dim-ext" />
+                <line x1={x1} y1={dimTop} x2={cx - 2} y2={dimTop} className="dim-line" />
+                <line x1={cx + 2} y1={dimTop} x2={x2} y2={dimTop} className="dim-line" />
+                <polygon points={`${x1},${dimTop} ${x1 + ARROW},${dimTop - ARROW / 2} ${x1 + ARROW},${dimTop + ARROW / 2}`} className="dim-arrow" />
+                <polygon points={`${x2},${dimTop} ${x2 - ARROW},${dimTop - ARROW / 2} ${x2 - ARROW},${dimTop + ARROW / 2}`} className="dim-arrow" />
+                <text x={cx} y={dimTop - 0.5} className="dim-label">{wTxt}</text>
+                {/* height: right dimension */}
+                <line x1={extXRight[0]} y1={toY(y2)} x2={extXRight[1]} y2={toY(y2)} className="dim-ext" />
+                <line x1={extXRight[0]} y1={toY(y1)} x2={extXRight[1]} y2={toY(y1)} className="dim-ext" />
+                <line x1={dimRight} y1={toY(y2)} x2={dimRight} y2={toY(cy) - 2} className="dim-line" />
+                <line x1={dimRight} y1={toY(cy) + 2} x2={dimRight} y2={toY(y1)} className="dim-line" />
+                <polygon points={`${dimRight},${toY(y2)} ${dimRight - ARROW / 2},${toY(y2) - ARROW} ${dimRight + ARROW / 2},${toY(y2) - ARROW}`} className="dim-arrow" />
+                <polygon points={`${dimRight},${toY(y1)} ${dimRight - ARROW / 2},${toY(y1) + ARROW} ${dimRight + ARROW / 2},${toY(y1) + ARROW}`} className="dim-arrow" />
+                <text x={dimRight + 1.4} y={toY(cy)} className="dim-label" textAnchor="start">{hTxt}</text>
+                {/* bottom + left extension lines (guide only, no value) */}
+                <line x1={x1} y1={extYBot[0]} x2={x1} y2={extYBot[1]} className="dim-ext" />
+                <line x1={x2} y1={extYBot[0]} x2={x2} y2={extYBot[1]} className="dim-ext" />
+                <line x1={extXLeft[0]} y1={toY(y2)} x2={extXLeft[1]} y2={toY(y2)} className="dim-ext" />
+                <line x1={extXLeft[0]} y1={toY(y1)} x2={extXLeft[1]} y2={toY(y1)} className="dim-ext" />
+              </g>
+            )
+          })()}
 
           {drawRect && drawKind && drawStart.current && (() => {
             const a = [drawRect.x1, drawRect.y1]

@@ -474,16 +474,37 @@
   fill: #c0392b;
 }
 
-/* live width×height readout shown while resizing a zone (dragging a vertex
-   or edge midpoint) — blue, with a white halo like the measure label. */
-.zone-dim-label {
+/* Engineering-drawing dimension readout shown while resizing a zone:
+   thin extension/guide lines from the corners, a dimension line outside the
+   zone with filled arrowheads at each end, and the value breaking the line. */
+.dim-ext {
+  stroke: #2563eb;
+  stroke-width: 0.6;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.dim-line {
+  stroke: #2563eb;
+  stroke-width: 0.8;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.dim-arrow {
+  fill: #2563eb;
+  stroke: none;
+  pointer-events: none;
+}
+
+.dim-label {
   font-size: 1.4px;
   font-weight: 600;
   text-anchor: middle;
   fill: #2563eb;
   paint-order: stroke fill;
   stroke: #fff;
-  stroke-width: 0.5px;
+  stroke-width: 0.4px;
   stroke-linejoin: round;
   pointer-events: none;
 }
