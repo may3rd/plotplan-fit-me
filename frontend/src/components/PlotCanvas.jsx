@@ -136,6 +136,7 @@ function centerlineRect(start, end, width) {
 
 export default function PlotCanvas({
   data, positions, onPositions, view, setView, showGrid, showRuler, gridStep, snap, tool, setTool,
+  viewMode,
   rackWidth, setRackWidth, roadWidth, setRoadWidth, drawPromptNonce,
   editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone,
   selectedZone, setSelectedZone, editMode,
@@ -549,6 +550,7 @@ export default function PlotCanvas({
           className="plot"
           data-tool={tool}
           data-edit={editMode ? 'on' : 'off'}
+          data-view={viewMode}
           width="100%"
           height="100%"
           viewBox={`${v.x} ${v.y} ${v.w} ${v.h}`}
@@ -558,6 +560,12 @@ export default function PlotCanvas({
           onPointerUp={onPointerUp}
           onPointerLeave={() => onCursor(null)}
         >
+          <clipPath id="site-clip" clipPathUnits="userSpaceOnUse">
+            <rect x={0} y={0} width={site.w} height={site.d} />
+          </clipPath>
+
+          <rect x={0} y={0} width={site.w} height={site.d} className="site" />
+
           {showGrid && (
             <g className="grid-minor" clipPath="url(#site-clip)">
               {xt.minorOut.map((wx) => (
@@ -579,12 +587,6 @@ export default function PlotCanvas({
             </g>
           )}
 
-          <clipPath id="site-clip" clipPathUnits="userSpaceOnUse">
-            <rect x={0} y={0} width={site.w} height={site.d} />
-          </clipPath>
-
-          <rect x={0} y={0} width={site.w} height={site.d} className="site" />
-
           {Object.entries(keepouts ?? {}).map(([zone, poly]) => {
             const upper = zone.toUpperCase()
             const kind = upper.startsWith('RACK') ? 'rack'
@@ -601,11 +603,19 @@ export default function PlotCanvas({
                   onPointerDown={(ev) => onPointerDownZone(zone, ev)}
                   onDoubleClick={(ev) => onDoubleClickZone(zone, ev)}
                 />
-                {hatch.map((l, i) => (
+                {viewMode !== 'dxf' && hatch.map((l, i) => (
                   <line key={i} x1={l.x1} y1={toY(l.y1)} x2={l.x2} y2={toY(l.y2)} className="rack-hatch" />
                 ))}
-                {kind === 'rack' && <text x={cx} y={toY(cy) + 0.6} className="rack-label">Pipe Rack</text>}
-                {kind === 'road' && <text x={cx} y={toY(cy) + 0.6} className="zone-label">Road</text>}
+                {viewMode === 'dxf' ? (
+                  // real DXF export labels every zone with its own name, not a
+                  // generic "Pipe Rack"/"Road" — see backend write_dxf/_zone_layer.
+                  <text x={cx} y={toY(cy) + 0.6} className="zone-label">{zone}</text>
+                ) : (
+                  <>
+                    {kind === 'rack' && <text x={cx} y={toY(cy) + 0.6} className="rack-label">Pipe Rack</text>}
+                    {kind === 'road' && <text x={cx} y={toY(cy) + 0.6} className="zone-label">Road</text>}
+                  </>
+                )}
                 {/* vertex handles (square corners) + edge midpoint handles
                     (round) for the selected zone in Edit mode — drag a corner
                     to reshape, drag an edge midpoint to expand/shrink that
@@ -639,7 +649,9 @@ export default function PlotCanvas({
             )
           })}
 
-          {connections.map((c, i) => {
+          {/* pipe routing lines aren't part of the DXF export (write_dxf has
+              no CONN layer) — hide them in DXF view for an accurate preview. */}
+          {viewMode !== 'dxf' && connections.map((c, i) => {
             const a = positions[c.a]
             const b = positions[c.b]
             if (!a || !b) return null
@@ -681,7 +693,7 @@ export default function PlotCanvas({
                   y={toY(p.y) - e.d / 2}
                   width={e.w}
                   height={e.d}
-                  fill={CLASS_COLOR[e.cls] ?? '#888'}
+                  fill={viewMode === 'normal' ? (CLASS_COLOR[e.cls] ?? '#888') : 'none'}
                   className={`equip ${e.pinned ? 'pinned' : ''} ${violating ? 'violating' : ''}`}
                   onPointerDown={(ev) => onPointerDownEquip(e.tag, ev)}
                 />
@@ -713,14 +725,14 @@ export default function PlotCanvas({
             const { cx, cy, w, h } = zoneDim
             const x1 = cx - w / 2, x2 = cx + w / 2
             const y1 = cy - h / 2, y2 = cy + h / 2
-            const dimTop = toY(y2) + DIM_OFFSET
-            const dimBot = toY(y1) - DIM_OFFSET
+            const dimTop = toY(y2) - DIM_OFFSET
+            const dimBot = toY(y1) + DIM_OFFSET
             const dimLeft = x1 - DIM_OFFSET
             const dimRight = x2 + DIM_OFFSET
             const wTxt = `${fmtM(w)} m`
             const hTxt = `${fmtM(h)} m`
-            const extYTop = [toY(y2) + EXT_GAP, dimTop + EXT_OVER]
-            const extYBot = [toY(y1) - EXT_GAP, dimBot - EXT_OVER]
+            const extYTop = [toY(y2) - EXT_GAP, dimTop - EXT_OVER]
+            const extYBot = [toY(y1) + EXT_GAP, dimBot + EXT_OVER]
             const extXLeft = [x1 - EXT_GAP, dimLeft - EXT_OVER]
             const extXRight = [x2 + EXT_GAP, dimRight + EXT_OVER]
             return (
@@ -732,7 +744,7 @@ export default function PlotCanvas({
                 <line x1={cx + 2} y1={dimTop} x2={x2} y2={dimTop} className="dim-line" />
                 <polygon points={`${x1},${dimTop} ${x1 + ARROW},${dimTop - ARROW / 2} ${x1 + ARROW},${dimTop + ARROW / 2}`} className="dim-arrow" />
                 <polygon points={`${x2},${dimTop} ${x2 - ARROW},${dimTop - ARROW / 2} ${x2 - ARROW},${dimTop + ARROW / 2}`} className="dim-arrow" />
-                <text x={cx} y={dimTop - 0.5} className="dim-label">{wTxt}</text>
+                <text x={cx} y={dimTop + 0.5} className="dim-label">{wTxt}</text>
                 {/* height: right dimension */}
                 <line x1={extXRight[0]} y1={toY(y2)} x2={extXRight[1]} y2={toY(y2)} className="dim-ext" />
                 <line x1={extXRight[0]} y1={toY(y1)} x2={extXRight[1]} y2={toY(y1)} className="dim-ext" />

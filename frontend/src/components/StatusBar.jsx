@@ -1,3 +1,5 @@
+import { ZoomDialog } from '@/components/Ribbon'
+
 export default function StatusBar({ projectLabel, score, cursor, zoomPct, setZoomPercent, tool }) {
   return (
     <div className="statusbar">
@@ -17,12 +19,20 @@ export default function StatusBar({ projectLabel, score, cursor, zoomPct, setZoo
       <span className="capitalize">{tool}</span>
       <span className="status-sep" />
       <input
-        type="range" min="10" max="400" step="1"
+        type="range" min="10" max="400" step="1" list="zoom-100"
         value={Math.min(400, Math.max(10, zoomPct))}
         onChange={(e) => setZoomPercent(Number(e.target.value))}
         className="zoom-slider" title={`${zoomPct}%`}
       />
-      <span className="tabular-nums w-10 text-right">{zoomPct}%</span>
+      <datalist id="zoom-100"><option value="100" /></datalist>
+      <ZoomDialog
+        zoomPct={zoomPct} setZoomPercent={setZoomPercent}
+        trigger={(
+          <button type="button" className="tabular-nums w-10 text-right zoom-pct-btn">
+            {zoomPct}%
+          </button>
+        )}
+      />
     </div>
   )
 }

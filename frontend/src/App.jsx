@@ -27,6 +27,7 @@ function App() {
   const [showRuler, setShowRuler] = useState(true)
   const [gridStep, setGridStep] = useState(null) // meters/tick override; null = auto
   const [snap, setSnap] = useState(false)
+  const [viewMode, setViewMode] = useState('normal') // 'normal' | 'wireframe' | 'dxf'
   const [tool, setTool] = useState('select') // 'select' | 'pan' | 'edit'
   const editMode = tool === 'edit' // when 'edit', zones (road/rack/underground/other) are draggable on the canvas
   const [rackWidth, setRackWidth] = useState(8) // meters, pipe-rack width (preferences, later)
@@ -273,6 +274,7 @@ function App() {
         showRuler={showRuler} setShowRuler={setShowRuler}
         gridStep={gridStep} setGridStep={setGridStep}
         snap={snap} setSnap={setSnap}
+        viewMode={viewMode} setViewMode={setViewMode}
         tool={tool} setTool={setTool} bumpDrawPrompt={bumpDrawPrompt} fit={fit}
         bumpEditPrompt={bumpEditPrompt} selectedZone={selectedZone} deleteZone={deleteSelectedZone}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
@@ -286,6 +288,7 @@ function App() {
           data={data} positions={positions} onPositions={onPositions}
           view={view} setView={setView}
           showGrid={showGrid} showRuler={showRuler} gridStep={gridStep} snap={snap} tool={tool} setTool={setTool}
+          viewMode={viewMode}
           editMode={editMode}
           rackWidth={rackWidth} setRackWidth={setRackWidth}
           roadWidth={roadWidth} setRoadWidth={setRoadWidth}

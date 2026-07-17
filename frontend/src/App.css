@@ -236,6 +236,19 @@
   cursor: pointer;
 }
 
+.zoom-pct-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.zoom-pct-btn:hover {
+  text-decoration: underline;
+}
+
 /* ---- the SVG plot itself ------------------------------------------------ */
 
 .plot {
@@ -507,4 +520,49 @@
   stroke-width: 0.4px;
   stroke-linejoin: round;
   pointer-events: none;
+}
+
+/* ---- view modes: Wireframe / DXF export simulation ----------------------
+   Normal is the default styling above, untouched. Wireframe just drops
+   fills so objects/zones read as outlines. DXF goes further, approximating
+   what backend write_dxf() actually produces: plain monochrome LINE/TEXT
+   entities, no color table, no linetypes (so no dashes), and none of the
+   screen-only aids that have no matching DXF layer (grid, pipe routing). */
+
+.plot[data-view='wireframe'] .zone,
+.plot[data-view='wireframe'] .pull-zone,
+.plot[data-view='wireframe'] .wind-zone {
+  fill: none;
+}
+
+.plot[data-view='dxf'] {
+  background: #fff;
+}
+
+.plot[data-view='dxf'] .site {
+  fill: #fff;
+  stroke: #000;
+}
+
+.plot[data-view='dxf'] .zone {
+  fill: none;
+  stroke: #000;
+}
+
+.plot[data-view='dxf'] .pull-zone,
+.plot[data-view='dxf'] .wind-zone {
+  fill: none;
+  stroke: #000;
+  stroke-dasharray: none;
+}
+
+.plot[data-view='dxf'] .grid line,
+.plot[data-view='dxf'] .grid-minor line {
+  display: none;
+}
+
+.plot[data-view='dxf'] .tag,
+.plot[data-view='dxf'] .zone-label,
+.plot[data-view='dxf'] .rack-label {
+  fill: #000;
 }

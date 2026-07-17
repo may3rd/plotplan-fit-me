@@ -35,7 +35,7 @@ const ZOOM_PRESETS = [200, 150, 100, 75, 50, 25]
 // Word-style "Zoom" dialog: a preset radio list plus a free-entry percent
 // field, opened from a single magnifier button — replaces the old inline
 // zoom-in/zoom-out/percent controls in the ribbon.
-function ZoomDialog({ zoomPct, setZoomPercent }) {
+export function ZoomDialog({ zoomPct, setZoomPercent, trigger }) {
   const [open, setOpen] = useState(false)
   const [pct, setPct] = useState(zoomPct)
 
@@ -52,7 +52,7 @@ function ZoomDialog({ zoomPct, setZoomPercent }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline" size="icon" title="Zoom"><Search /></Button>
+        {trigger ?? <Button variant="outline" size="icon" title="Zoom"><Search /></Button>}
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -131,6 +131,7 @@ export default function Ribbon(props) {
   const {
     units, unitName, setUnitName, seedsInput, setSeedsInput, solve, solving, results,
     showGrid, setShowGrid, showRuler, setShowRuler, gridStep, setGridStep, snap, setSnap,
+    viewMode, setViewMode,
     tool, setTool, bumpDrawPrompt, fit, zoomPct, setZoomPercent,
     bumpEditPrompt, selectedZone, deleteZone,
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
@@ -320,6 +321,17 @@ export default function Ribbon(props) {
           <Group label="Zoom">
             <ZoomDialog zoomPct={zoomPct} setZoomPercent={setZoomPercent} />
             <Button variant="outline" size="icon" onClick={fit} title="Fit width"><ArrowLeftRight /></Button>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
+          <Group label="View mode">
+            <Select value={viewMode} onValueChange={setViewMode}>
+              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="normal">Normal</SelectItem>
+                <SelectItem value="wireframe">Wireframe</SelectItem>
+                <SelectItem value="dxf">DXF</SelectItem>
+              </SelectContent>
+            </Select>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Show">
