@@ -81,13 +81,20 @@ export function adaptiveStep(base, span, minTicks = 4, maxTicks = 20) {
   return step
 }
 
-/** Major + minor tick positions (world units) inside [lo, hi]. `gridStep`
- * (meters/tick) anchors the major step when given (a truthy positive
- * number, scaled per `adaptiveStep`); otherwise it's an auto "nice" step
- * from the visible span. Minor ticks subdivide each major step into 5,
- * skipping any that land on a major tick. */
-export function ticks(lo, hi, span, gridStep) {
-  const step = gridStep > 0 ? adaptiveStep(gridStep, span) : niceStep(span / 10)
+/** The major tick step for a visible `span` (world units). `gridStep`
+ * (meters/tick) anchors it when given (a truthy positive number, scaled
+ * per `adaptiveStep`); otherwise it's an auto "nice" step from the span. */
+export function tickStep(span, gridStep) {
+  return gridStep > 0 ? adaptiveStep(gridStep, span) : niceStep(span / 10)
+}
+
+/** Major + minor tick positions (world units) inside [lo, hi] for an
+ * already-decided major `step` (see tickStep) — kept separate from step
+ * selection so callers can force the SAME step on both the x and y rulers
+ * (their spans differ slightly whenever the viewBox aspect isn't square,
+ * which would otherwise pick different auto steps per axis). Minor ticks
+ * subdivide each major step into 5, skipping any that land on a major one. */
+export function ticksAtStep(lo, hi, step) {
   const out = []
   for (let t = Math.ceil(lo / step) * step; t <= hi; t += step) out.push(Math.round(t / step) * step)
   const minorStep = step / 5
@@ -98,4 +105,12 @@ export function ticks(lo, hi, span, gridStep) {
     if (Math.abs(ratio - Math.round(ratio)) > 1e-6) minorOut.push(r)
   }
   return { step, out, minorStep, minorOut }
+}
+
+/** Major + minor tick positions (world units) inside [lo, hi], picking the
+ * step from `span` itself. Convenience wrapper of tickStep + ticksAtStep
+ * for a single axis considered in isolation (see PlotCanvas for the
+ * shared-step case, where x and y must not pick different auto steps). */
+export function ticks(lo, hi, span, gridStep) {
+  return ticksAtStep(lo, hi, tickStep(span, gridStep))
 }

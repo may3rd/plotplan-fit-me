@@ -355,3 +355,45 @@ Format: `- [date] finding — why it matters`
   shape needs to change again, grep `CaseData` and `_build_case` first —
   same "grep before assuming" caution as every other shape change logged
   above.
+- [2026-07-17] Pipe racks unified into `keepouts` as a `RACK*`-named zone
+  (same mechanism ROAD*/MAINT* already used), at explicit user request so
+  a rack could become a real rectangle drawable on the canvas instead of a
+  `(rack_y, rack_half)` band implicitly spanning the whole site width.
+  `Site.racks` is gone entirely — `Site` is just `w, d, wind_dir` now.
+  `_rack_zones(keepouts)` (grep this before assuming a call site still
+  takes a `racks` param) pulls out `RACK*` zones; their bounding box is
+  both the exclusion (for free, via the existing generic keepout-overlap
+  check — no rack-specific feasibility code needed anymore) and the
+  piping-routing target (`piping_cost()`/`solve_cpsat()`'s objective pick
+  whichever rack zone's y-center gives the shortest rise+drop, unchanged
+  reasoning from before). `piping_cost()`/`solve_cpsat()` raise a clear
+  error if a unit has connections but no `RACK*` zone — but only when
+  `conns` is non-empty, since a blank/equipment-less project (frontend's
+  File > New) must still score cleanly at cost 0 without one.
+  Two correctness traps hit during the refactor, worth knowing before
+  touching this again: (1) migrating sample_unit's two racks to zones
+  spanning the full site width at the same y-bands changed the CLI's best
+  score for seeds 0:8 from 394 to 386 — NOT a bug, confirmed via a 500k-case
+  fuzz test showing `feasible()`'s new keepout-based rack check is exactly
+  equivalent to the old formula for any footprint inside site bounds; the
+  score differs only because SA pushes equipment to the site's edge
+  (`site.d - e.d/2`), which for this unit's specific dimensions lands
+  exactly on a rack's edge too — old code's strict `<` let that
+  exact-touching case slide, the new shared keepout check (already
+  non-strict/inclusive, same as every other zone) correctly treats it as a
+  hit, and SA finds a different (here, better) path from there. (2) CP-SAT
+  needed `CPSAT_EPS_M` padding added to `kboxes` (previously zero-padded,
+  since a plain keepout's zero-margin non-strict check seemed consistent
+  with `_cpsat_no_overlap`'s gap=0) — measured via `test_cpsat.py` that
+  `_rect_hits_poly`'s ray-casting point-in-polygon test is ambiguous for a
+  query point exactly ON a zone edge/vertex, and the piping-cost objective
+  actively pulls solutions flush against a rack's edge (unlike most plain
+  keepouts, which nothing is attracted toward), reliably triggering that
+  ambiguity for racks specifically. Frontend: `PlotCanvas.jsx` gained a
+  rubber-band draw tool (`draw-road`/`draw-rack`, tool value convention
+  matches the `DRAW_PREFIX` map) — drag on the canvas background commits a
+  new `{PREFIX}_{n}` zone via `onAddZone`; click-to-select (only in the
+  `select` tool) + Delete/Backspace removes one via `onDeleteZone`. Both
+  live in `App.jsx`, mutating `data.keepouts` the same way drag/solve
+  mutate `positions` — no new persistence concept, Save/Save As already
+  serialize whatever's in `data`.

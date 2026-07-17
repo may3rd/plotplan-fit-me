@@ -5,6 +5,7 @@
   grid-template-rows: auto 1fr auto;
   height: 100vh;
   overflow: hidden;
+  background: var(--app-backdrop);
 }
 
 .canvas-area {
@@ -12,17 +13,19 @@
   background: #eceef1;
 }
 
-/* ---- ribbon + menu bar (Office 365 style) -------------------------------- */
+/* ---- ribbon + menu bar (Word-style: floating rounded card) --------------- */
 
 :root {
-  --office-accent: #185abd; /* Word-ish blue titlebar */
+  --office-accent: #185abd; /* Word-ish blue, used sparingly (active tab, Solve button) */
   --office-accent-dark: #0f3f8c;
-  --office-ribbon-bg: #f6f7f9;
+  --office-ribbon-bg: #f8f8f7;
+  --app-backdrop: #e7e8ea;
 }
 .dark {
   --office-accent: #2b6cd4;
   --office-accent-dark: #1c4c9e;
   --office-ribbon-bg: #232323;
+  --app-backdrop: #18181a;
 }
 
 .ribbon-shell {
@@ -30,42 +33,49 @@
   border-bottom: 1px solid var(--border);
 }
 
-.menubar-row {
+/* one row: app icon, File menu, ribbon tabs, Help menu — the tab strip and
+   the dropdown menus share a single strip, Word-style. */
+.ribbon-tabrow {
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0 0.75rem;
+  align-items: stretch;
+  gap: 0.25rem;
+  padding-left: 0.5rem;
   height: 2.25rem;
-  background: var(--office-accent);
-  color: #fff;
+  border-bottom: 1px solid var(--border);
 }
 
 .app-icon {
   width: 16px;
   height: 16px;
-  opacity: 0.95;
+  align-self: center;
+  opacity: 0.8;
+  color: var(--office-accent);
 }
 
-.app-name {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  margin-right: 0.5rem;
+/* File / Help dropdown triggers styled to sit flush in the tab strip and
+   read like the (inactive) tabs beside them. */
+.titlebar-menubar {
+  height: 100%;
+  align-items: stretch;
 }
-
 .titlebar-menubar :where([data-slot='menubar-trigger']) {
-  color: rgba(255, 255, 255, 0.9);
+  height: 100%;
+  padding: 0 0.6rem;
+  border-radius: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--muted-foreground);
 }
 .titlebar-menubar :where([data-slot='menubar-trigger']):hover,
 .titlebar-menubar :where([data-slot='menubar-trigger'][aria-expanded='true']) {
-  background: rgba(255, 255, 255, 0.16);
-  color: #fff;
+  background: color-mix(in oklch, var(--office-accent) 12%, transparent);
+  color: var(--foreground);
 }
 
 .ribbon-tablist {
-  padding-left: 0.5rem;
-  height: 2rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--card);
+  height: 100%;
+  border-bottom: 0;
+  background: transparent;
 }
 
 .ribbon-tablist :where([data-slot='tabs-trigger']) {
@@ -73,13 +83,14 @@
   font-weight: 600;
   color: var(--muted-foreground);
 }
-.ribbon-tablist :where([data-slot='tabs-trigger'][data-active]) {
+.ribbon-tablist [data-slot='tabs-trigger'][data-state='active'] {
   color: var(--office-accent);
 }
-.ribbon-tablist :where([data-slot='tabs-trigger'][data-active])::after {
+.ribbon-tablist [data-slot='tabs-trigger'][data-state='active']::after {
   background: var(--office-accent) !important;
   opacity: 1 !important;
   height: 2px !important;
+  bottom: 0 !important;
 }
 
 .ribbon-body {
@@ -88,7 +99,7 @@
   gap: 0.5rem;
   padding: 0.4rem 0.75rem;
   height: 5.625rem; /* fixed so switching Home/View tabs never resizes the ribbon */
-  background: var(--office-ribbon-bg);
+  background: transparent;
 }
 
 .ribbon-group {
@@ -212,19 +223,37 @@
   background: var(--border);
 }
 
+/* minimal native range input — no custom track/thumb chrome beyond sizing */
+.zoom-slider {
+  width: 80px;
+  height: 0.9rem;
+  accent-color: var(--office-accent);
+  cursor: pointer;
+}
+
 /* ---- the SVG plot itself ------------------------------------------------ */
 
 .plot {
   display: block;
   width: 100%;
   height: 100%;
-  background: #f7f7f5;
+  background: #e4e6ea; /* grey outside the site — .site itself gets the off-white fill */
   touch-action: none;
   user-select: none;
 }
 
 .plot[data-tool='pan'] {
   cursor: grab;
+}
+
+.plot[data-tool='draw-road'],
+.plot[data-tool='draw-rack'] {
+  cursor: crosshair;
+}
+
+.zone-ghost {
+  opacity: 0.4;
+  pointer-events: none;
 }
 
 .grid line {
@@ -241,17 +270,9 @@
 }
 
 .site {
-  fill: none;
+  fill: #f7f7f5;
   stroke: #333;
   stroke-width: 1.2;
-  vector-effect: non-scaling-stroke;
-}
-
-.rack {
-  fill: #8bc98f;
-  fill-opacity: 0.55;
-  stroke: #4a8f52;
-  stroke-width: 0.8;
   vector-effect: non-scaling-stroke;
 }
 
@@ -274,6 +295,7 @@
   fill-opacity: 0.25;
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+  cursor: pointer;
 }
 
 .zone.keepout {
@@ -289,6 +311,19 @@
 .zone.maint {
   fill: #f1c40f;
   stroke: #f1c40f;
+}
+
+.zone.rack {
+  fill: #8bc98f;
+  fill-opacity: 0.55;
+  stroke: #4a8f52;
+  stroke-width: 0.8;
+}
+
+.zone.selected {
+  stroke: #2563eb;
+  stroke-width: 2.5;
+  stroke-dasharray: 2 1;
 }
 
 .zone-label {

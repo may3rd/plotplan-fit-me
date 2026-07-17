@@ -1,4 +1,4 @@
-export default function StatusBar({ projectLabel, score, cursor, zoomPct, tool }) {
+export default function StatusBar({ projectLabel, score, cursor, zoomPct, setZoomPercent, tool }) {
   return (
     <div className="statusbar">
       <span>{projectLabel ?? '—'}</span>
@@ -16,7 +16,13 @@ export default function StatusBar({ projectLabel, score, cursor, zoomPct, tool }
       <span className="status-sep" />
       <span className="capitalize">{tool}</span>
       <span className="status-sep" />
-      <span className="tabular-nums">{zoomPct}%</span>
+      <input
+        type="range" min="10" max="400" step="1"
+        value={Math.min(400, Math.max(10, zoomPct))}
+        onChange={(e) => setZoomPercent(Number(e.target.value))}
+        className="zoom-slider" title={`${zoomPct}%`}
+      />
+      <span className="tabular-nums w-10 text-right">{zoomPct}%</span>
     </div>
   )
 }

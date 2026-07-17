@@ -28,6 +28,10 @@ function App() {
   const [gridStep, setGridStep] = useState(null) // meters/tick override; null = auto
   const [snap, setSnap] = useState(false)
   const [tool, setTool] = useState('select')
+  const [rackWidth, setRackWidth] = useState(8) // meters, pipe-rack width (preferences, later)
+  const [roadWidth, setRoadWidth] = useState(6) // meters, road width (preferences, later)
+  const [drawPromptNonce, setDrawPromptNonce] = useState(0) // bump to (re)open the road/rack width prompt
+  const bumpDrawPrompt = useCallback(() => setDrawPromptNonce((n) => n + 1), [])
   const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
   const fittedFor = useRef(null)
 
@@ -94,6 +98,21 @@ function App() {
     setPositions(next)
     scoreLayout(next)
   }, [scoreLayout])
+
+  // add/remove a keepouts zone (road/rack drawn on canvas, or any other) —
+  // changing `data` here re-triggers the scoreLayout effect below, since a
+  // zone can flip feasibility just like moving equipment can.
+  const addZone = useCallback((name, poly) => {
+    setData((d) => ({ ...d, keepouts: { ...d.keepouts, [name]: poly } }))
+  }, [])
+
+  const deleteZone = useCallback((name) => {
+    setData((d) => {
+      const keepouts = { ...d.keepouts }
+      delete keepouts[name]
+      return { ...d, keepouts }
+    })
+  }, [])
 
   const zoomCenter = useCallback((factor) => {
     if (!csize?.width) return
@@ -229,8 +248,7 @@ function App() {
         showRuler={showRuler} setShowRuler={setShowRuler}
         gridStep={gridStep} setGridStep={setGridStep}
         snap={snap} setSnap={setSnap}
-        tool={tool} setTool={setTool}
-        zoomIn={() => zoomCenter(0.8)} zoomOut={() => zoomCenter(1.25)} fit={fit}
+        tool={tool} setTool={setTool} bumpDrawPrompt={bumpDrawPrompt} fit={fit}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
         newProject={newProject} openProject={openProject}
         saveProject={saveProject} saveProjectAs={saveProjectAs}
@@ -241,14 +259,18 @@ function App() {
         <PlotCanvas
           data={data} positions={positions} onPositions={onPositions}
           view={view} setView={setView}
-          showGrid={showGrid} showRuler={showRuler} gridStep={gridStep} snap={snap} tool={tool}
+          showGrid={showGrid} showRuler={showRuler} gridStep={gridStep} snap={snap} tool={tool} setTool={setTool}
+          rackWidth={rackWidth} setRackWidth={setRackWidth}
+          roadWidth={roadWidth} setRoadWidth={setRoadWidth}
+          drawPromptNonce={drawPromptNonce}
           onCursor={setCursor} onSize={setCsize}
+          onAddZone={addZone} onDeleteZone={deleteZone}
         />
       </main>
 
       <StatusBar
         projectLabel={fileName ?? data.name ?? 'untitled'} score={score} cursor={cursor}
-        zoomPct={view ? zoomPercent(view, fitW.current) : 100}
+        zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
         tool={tool}
       />
     </div>

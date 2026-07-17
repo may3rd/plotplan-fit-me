@@ -19,8 +19,12 @@ def build_unit(n=32, seed=1):
     for _ in range(n):
         a, b = rng.sample(eq, 2)
         conns.append((a.tag, b.tag, round(rng.uniform(1, 5), 1)))
-    site = p.Site(170.0, 130.0, [(45.0, 3.0), (95.0, 3.0)], wind_dir="x+")
-    keepouts = {"UNDERGROUND": [(140, 5), (160, 5), (160, 40), (140, 40)]}
+    site = p.Site(170.0, 130.0, wind_dir="x+")
+    keepouts = {
+        "UNDERGROUND": [(140, 5), (160, 5), (160, 40), (140, 40)],
+        "RACK_1": [(0, 42), (170, 42), (170, 48), (0, 48)],
+        "RACK_2": [(0, 92), (170, 92), (170, 98), (0, 98)],
+    }
     return eq, conns, p.load_spacing(
         __import__("os").path.join(__import__("os").path.dirname(__file__),
                                     "data", "sample_unit", "spacing.csv")), site, keepouts
@@ -33,7 +37,7 @@ def main():
 
     cost = p.solve_cpsat(eq, conns, site, spacing, keepouts, seed=0, time_limit_s=15.0)
     p._check(eq, site, spacing, keepouts, pinned_before)
-    assert abs(p.piping_cost(eq, conns, site) - cost) < 1e-6, \
+    assert abs(p.piping_cost(eq, conns, site, keepouts) - cost) < 1e-6, \
         "solve_cpsat's returned cost must equal piping_cost() on the decoded layout"
 
     by_tag = {e.tag: e for e in eq}

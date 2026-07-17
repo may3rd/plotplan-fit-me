@@ -13,7 +13,7 @@ export const PROJECT_VERSION = 1
  * would use, ready for File > Open to load real content into. */
 export const BLANK_PROJECT = {
   name: 'untitled',
-  site: { w: 50, d: 50, racks: [], wind_dir: '' },
+  site: { w: 50, d: 50, wind_dir: '' },
   equipment: [],
   connections: [],
   keepouts: {},

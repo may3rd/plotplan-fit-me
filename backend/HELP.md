@@ -64,79 +64,95 @@ are placeholders.
 
 ### site.csv — required
 
-Describes the site rectangle and one or more pipe racks.
+Describes the site rectangle. One row (extra rows are ignored):
 
 | column | meaning |
 |---|---|
-| `w`, `d` | site extent in meters (x, y) — only read from the first row |
-| `rack_y` | y-coordinate of a rack spine's centerline |
-| `rack_half` | half-width of that rack's corridor — equipment can't encroach within this + its own half-depth of the centerline |
-
-One row = one rack spine, same "grouped rows" idea as `keepouts.csv`. A
-single row is the original single-rack format, unchanged:
+| `w`, `d` | site extent in meters (x, y) |
+| `wind_dir` | optional — see the wind constraint below |
 
 ```
-w,d,rack_y,rack_half
-90,60,30,4
+w,d
+90,60
 ```
 
-For more than one rack (parallel spines), add a row per rack — leave `w,d`
-blank on the extra rows, they're ignored past the first:
+An optional `wind_dir` column sets the prevailing wind direction — `x+`,
+`x-`, `y+`, or `y-`, the side the wind blows *from* (the upwind side of
+every fired heater). No equipment may sit within `WIND_CLEARANCE_M` (a
+module constant in `plotplan.py`) of that side of any `fired_heater`-class
+item — a hydrocarbon release there would blow straight into the open
+flame. Leave the column blank or omit it for no wind constraint:
 
 ```
-w,d,rack_y,rack_half
-90,80,30,4
-,,70,4
-```
-
-Every connection routes via whichever rack gives it the shorter rise+drop
-(the run-along-x term doesn't depend on which rack, so it never affects the
-choice). Equipment can't encroach on *any* rack's corridor. Rack steel is
-also costed: for each rack actually used by at least one connection, its
-physical span (leftmost to rightmost x among the equipment routed onto it)
-is added to the score at `RACK_STEEL_COST_PER_M` (a module constant in
-`plotplan.py`, same units as piping weight×length) — more racks means more
-steel to pay for, not a free lunch.
-
-An optional `wind_dir` column (only read from the first row, like `w`/`d`)
-sets the prevailing wind direction — `x+`, `x-`, `y+`, or `y-`, the side the
-wind blows *from* (the upwind side of every fired heater). No equipment may
-sit within `WIND_CLEARANCE_M` (a module constant in `plotplan.py`) of that
-side of any `fired_heater`-class item — a hydrocarbon release there would
-blow straight into the open flame. Leave the column blank or omit it for no
-wind constraint (the original behavior):
-
-```
-w,d,rack_y,rack_half,wind_dir
-90,80,30,4,x+
-,,70,4,
+w,d,wind_dir
+90,80,x+
 ```
 
 That says wind blows from the east (`x+`): nothing may sit east of a fired
 heater within the clearance distance.
 
-### keepouts.csv — optional
+### keepouts.csv — required (at least one `RACK*` zone)
 
-Only needed if the site has exclusion zones. Rows sharing a `zone` name
-form one polygon, vertices in the order given (it closes automatically —
-don't repeat the first point).
+Rows sharing a `zone` name form one polygon, vertices in the order given
+(it closes automatically — don't repeat the first point).
 
 | column | meaning |
 |---|---|
 | `zone` | polygon name — shared across rows to group vertices |
 | `x`, `y` | one vertex |
 
-**Roads and maintenance corridors are the same mechanism**, not a separate
-file: name the zone starting with `ROAD` or `MAINT` and it draws on its own
-DXF layer, but it's checked identically to any other keep-out.
+**Roads, maintenance corridors, and pipe racks are all the same
+mechanism** — a keep-out zone, not a separate file or field. The zone
+*name* decides both its DXF layer and (for racks only) its extra role:
 
-If a unit has no exclusion zones, just don't create this file.
+| name prefix | DXF layer | also... |
+|---|---|---|
+| `RACK` | `RACK` | a piping-routing target — every connection rises to, runs along, and drops from whichever `RACK*` zone's y-center gives it the shortest rise+drop. At least one `RACK*` zone is required — `piping_cost()`/`solve()` raise a clear error without one. Rack steel is costed too: for each rack zone actually used by at least one connection, its physical span (leftmost to rightmost x among the equipment routed onto it) is added to the score at `RACK_STEEL_COST_PER_M` (a module constant in `plotplan.py`) — more racks means more steel to pay for, not a free lunch. |
+| `ROAD` | `ROADS` | nothing extra — a pure exclusion, same as any other keep-out |
+| `MAINT` | `MAINT` | nothing extra — a pure exclusion |
+| anything else | `KEEPOUT` | nothing extra — a pure exclusion |
+
+Every zone (rack or not) is a hard exclusion: no equipment footprint,
+pull-clearance rectangle, or wind sector may overlap it. A rack's
+rectangle is usually a full-width horizontal (or vertical) strip, but
+there's no requirement it span the whole site — a rack can be any
+rectangle anywhere in the site (this is also what lets the frontend draw
+one interactively rather than only loading it from a CSV).
+
+```
+zone,x,y
+RACK_1,0,26
+RACK_1,90,26
+RACK_1,90,34
+RACK_1,0,34
+```
+
+That's a rack spine 8m wide (y 26–34) spanning the full site width — the
+same shape the old `rack_y=30,rack_half=4` format described, just as an
+explicit rectangle instead of an implicit infinite-width band.
+
+Non-rack zones use the exact same file, e.g. a road:
+
+```
+zone,x,y
+ROAD_main,0,50
+ROAD_main,90,50
+ROAD_main,90,56
+ROAD_main,0,56
+```
+
+A circle (e.g. a flare sterile radius) is approximated as a many-sided
+polygon — more points, smoother circle.
+
+See `data/sample_unit/keepouts.csv` for worked `RACK`, `ROAD`, and generic
+(`UNDERGROUND`) examples.
 
 ---
 
 ## Use case 1: the simplest possible unit
 
-Two vessels, one pipe run, no pins, no keep-outs.
+Two vessels, one pipe run, no pins, no other keep-outs — just the required
+pipe rack.
 
 `equipment.csv`
 ```
@@ -159,8 +175,17 @@ vessel,vessel,3.0
 
 `site.csv`
 ```
-w,d,rack_y,rack_half
-50,40,20,3
+w,d
+50,40
+```
+
+`keepouts.csv`
+```
+zone,x,y
+RACK_1,0,17
+RACK_1,50,17
+RACK_1,50,23
+RACK_1,0,23
 ```
 
 Run it:
@@ -209,9 +234,11 @@ See `data/sample_unit/equipment.csv` — H-101 is pinned at (15, 15).
 
 ---
 
-## Use case 4: a flare radius / underground line / blast contour
+## Use case 4: a flare radius / underground line / blast contour / road / pipe rack
 
-Add `keepouts.csv` with one polygon per zone. A rectangle needs 4 rows:
+All five are the exact same file and mechanism — see the `keepouts.csv`
+section above for the full name-prefix table (`RACK`/`ROAD`/`MAINT`/
+anything else). A rectangle needs 4 rows:
 
 ```
 zone,x,y
@@ -225,30 +252,12 @@ No equipment footprint may overlap this rectangle. A circle (e.g. a flare
 sterile radius) is approximated as a many-sided polygon — more points,
 smoother circle.
 
-See `data/sample_unit/keepouts.csv` for a worked `UNDERGROUND` example.
+See `data/sample_unit/keepouts.csv` for worked `RACK`, `ROAD`, and generic
+(`UNDERGROUND`) examples.
 
 ---
 
-## Use case 5: a road or maintenance corridor
-
-Same file, same mechanism as use case 4 — just name the zone with a
-`ROAD` or `MAINT` prefix so it draws on its own DXF layer:
-
-```
-zone,x,y
-ROAD_main,0,50
-ROAD_main,90,50
-ROAD_main,90,56
-ROAD_main,0,56
-```
-
-That's a road strip along the north edge of the site (also present in
-`data/sample_unit/keepouts.csv`). Equipment still can't be placed on it — a
-road is a keep-out from the solver's point of view.
-
----
-
-## Use case 6: tube-pull / maintenance clearance
+## Use case 5: tube-pull / maintenance clearance
 
 A heat exchanger needs a clear straight run in front of it to pull the tube
 bundle for maintenance. Add `pull_side` and `pull_len` to that row:
@@ -259,8 +268,8 @@ E-102,exchanger,5,2,,,false,x+,6
 ```
 
 This says: E-102 needs 6 meters of clear space extending from its `+x`
-face. That swept rectangle must stay inside the site, clear of the rack
-corridor, clear of every keep-out zone, and clear of every other piece of
+face. That swept rectangle must stay inside the site, clear of every
+keep-out zone (pipe racks included), and clear of every other piece of
 equipment — nothing may sit in the pull path, even if it would otherwise
 satisfy normal spacing rules.
 
@@ -271,14 +280,14 @@ This is also present on E-102 in `data/sample_unit/equipment.csv`.
 
 ---
 
-## Use case 7: prevailing wind constraint
+## Use case 6: prevailing wind constraint
 
 Add `wind_dir` to `site.csv` to keep equipment out of a fired heater's
 upwind side:
 
 ```
-w,d,rack_y,rack_half,wind_dir
-90,80,30,4,x+
+w,d,wind_dir
+90,80,x+
 ```
 
 Wind blows from the east (`x+`) here, so no equipment may sit within
@@ -294,10 +303,10 @@ from `x+`).
 
 ### plotplan.dxf
 
-Layers: `SITE` (boundary), `RACK` (pipe rack corridor), `EQUIPMENT` +
-`TAGS` (footprints and labels), `KEEPOUT`/`ROADS`/`MAINT` (exclusion zones,
-split by name prefix), `PULL` (tube-pull/maintenance swept rectangles),
-`WIND` (fired heater upwind exclusion sectors).
+Layers: `SITE` (boundary), `EQUIPMENT` + `TAGS` (footprints and labels),
+`RACK`/`KEEPOUT`/`ROADS`/`MAINT` (keepouts.csv zones, split by name
+prefix — pipe racks included), `PULL` (tube-pull/maintenance swept
+rectangles), `WIND` (fired heater upwind exclusion sectors).
 
 ### plotplan_takeoff.csv
 
@@ -309,24 +318,27 @@ type,a,b,weight,length_m
 pipe,H-101,C-101,3,25.47
 pipe,C-101,E-101,2,21.09
 ...
-rack_span_used,,y=30,,24.90
+rack_span_used,,RACK_1,,24.90
 total_pipe_length_m,,,,197.08
 ```
 
 - `pipe` rows: one per connection, with the rack-routed length (meters)
   between those two tags at the final positions — each routed via whichever
-  rack spine is shortest for that connection.
-- `rack_span_used`: one row per rack actually used by at least one
-  connection, `b` identifying which rack (`y=<rack_y>`) and `length_m` the
-  x-distance between the leftmost and rightmost equipment routed onto it —
-  how much physical rack steel this layout actually needs (not the full
-  site width, which is usually more than what's used). A single-rack site
-  still gets exactly one such row.
+  `RACK*` zone is shortest for that connection.
+- `rack_span_used`: one row per rack zone actually used by at least one
+  connection, `b` identifying which zone and `length_m` the x-distance
+  between the leftmost and rightmost equipment routed onto it — how much
+  physical rack steel this layout actually needs (not the zone's full
+  width, which is usually more than what's used). A single-rack unit still
+  gets exactly one such row.
 - `total_pipe_length_m`: sum of all `pipe` row lengths (unweighted — this
   is meters of pipe, not the piping cost score).
 
 ## Common errors
 
+- **`no pipe rack zone defined (a keepouts zone named RACK*)`** — every
+  unit needs at least one `keepouts.csv` zone named `RACK*`; add one (see
+  the `keepouts.csv` section above).
 - **`no feasible initial layout — site too small for spacing table`** — the
   site can't fit everything given the spacing rules and keep-outs. Enlarge
   the site or loosen spacing.

@@ -97,14 +97,15 @@ class SpacingEntryIn(BaseModel):
 class SiteIn(BaseModel):
     w: float
     d: float
-    racks: list[list[float]] = []  # [[rack_y, rack_half], ...]
     wind_dir: str = ""
 
 
 class CaseData(BaseModel):
     """The full self-contained shape of a project — same fields GET
     /api/units/{name} returns, minus wind_clearance_m (that's a fixed
-    backend constant, not per-project data)."""
+    backend constant, not per-project data). Pipe racks are just a
+    `keepouts` zone named RACK* (see plotplan._rack_zones()) — no separate
+    field, same as roads/maintenance corridors."""
     name: str = "layout"
     equipment: list[EquipmentIn]
     connections: list[ConnectionIn] = []
@@ -121,7 +122,7 @@ def _build_case(data: CaseData):
     eq = [Equipment(**e.dict()) for e in data.equipment]
     conns = [(c.a, c.b, c.weight) for c in data.connections]
     spacing = {(s.a, s.b): s.gap for s in data.spacing}
-    site = Site(data.site.w, data.site.d, [(r[0], r[1]) for r in data.site.racks], data.site.wind_dir)
+    site = Site(data.site.w, data.site.d, data.site.wind_dir)
     keepouts = {zone: [(p[0], p[1]) for p in poly] for zone, poly in data.keepouts.items()}
     return eq, conns, spacing, site, keepouts
 
@@ -136,7 +137,7 @@ def score_data(req: ScoreRequest):
     already live in req.data.equipment, nothing is overlaid."""
     eq, conns, spacing, site, keepouts = _build_case(req.data)
     ok = feasible(eq, site, spacing, keepouts)
-    return {"feasible": ok, "cost": piping_cost(eq, conns, site) if ok else None}
+    return {"feasible": ok, "cost": piping_cost(eq, conns, site, keepouts) if ok else None}
 
 
 class SolveRequest(BaseModel):
@@ -193,7 +194,7 @@ def export_takeoff(req: ScoreRequest):
     fd, path = tempfile.mkstemp(suffix=".csv")
     os.close(fd)
     try:
-        write_takeoff(path, eq, conns, site)
+        write_takeoff(path, eq, conns, site, keepouts)
         with open(path, "rb") as f:
             content = f.read()
     finally:

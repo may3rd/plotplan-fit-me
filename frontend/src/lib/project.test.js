@@ -9,8 +9,11 @@ const data = {
     { tag: 'B', cls: 'vessel', w: 4, d: 4, x: 10, y: 10, pinned: true, pull_side: '', pull_len: 0 },
   ],
   connections: [{ a: 'A', b: 'B', weight: 1 }],
-  site: { w: 90, d: 80, racks: [[30, 4]], wind_dir: 'x+' },
-  keepouts: { ROAD_main: [[0, 0], [1, 0], [1, 1]] },
+  site: { w: 90, d: 80, wind_dir: 'x+' },
+  keepouts: {
+    ROAD_main: [[0, 0], [1, 0], [1, 1]],
+    RACK_1: [[0, 26], [90, 26], [90, 34], [0, 34]],
+  },
   spacing: [{ a: 'pump_hc', b: 'vessel', gap: 5 }],
   wind_clearance_m: 20,
 }

@@ -1,3 +1,2 @@
-w,d,rack_y,rack_half,wind_dir
-90,80,30,4,x+
-,,70,4,
+w,d,wind_dir
+90,80,x+

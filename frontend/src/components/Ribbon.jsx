@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Loader2, Magnet,
-  MousePointer2, Play, Ruler, Save, Search,
+  MousePointer2, Play, Rows3, Route, Ruler, Save, Search,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -10,7 +10,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
-  Menubar, MenubarCheckboxItem, MenubarContent, MenubarItem, MenubarMenu,
+  Menubar, MenubarContent, MenubarItem, MenubarMenu,
   MenubarSeparator, MenubarShortcut, MenubarSub, MenubarSubContent, MenubarSubTrigger, MenubarTrigger,
 } from '@/components/ui/menubar'
 import {
@@ -131,7 +131,7 @@ export default function Ribbon(props) {
   const {
     units, unitName, setUnitName, seedsInput, setSeedsInput, solve, solving, results,
     showGrid, setShowGrid, showRuler, setShowRuler, gridStep, setGridStep, snap, setSnap,
-    tool, setTool, zoomIn, zoomOut, fit, zoomPct, setZoomPercent,
+    tool, setTool, bumpDrawPrompt, fit, zoomPct, setZoomPercent,
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
   } = props
 
@@ -149,79 +149,71 @@ export default function Ribbon(props) {
         ref={openInputRef} type="file" accept=".json,application/json"
         className="hidden" onChange={handleOpenFile}
       />
-      <div className="menubar-row">
-        <LayoutGrid className="app-icon" />
-        <span className="app-name">plotplan-fit-me</span>
-        <Menubar className="titlebar-menubar border-0 bg-transparent shadow-none">
-          <MenubarMenu>
-            <MenubarTrigger>File</MenubarTrigger>
-            <MenubarContent>
-              <MenubarItem onSelect={newProject}>
-                <FilePlus className="size-4" /> New <MenubarShortcut>⌘N</MenubarShortcut>
-              </MenubarItem>
-              <MenubarItem onSelect={() => openInputRef.current?.click()}>
-                <FileUp className="size-4" /> Open… <MenubarShortcut>⌘O</MenubarShortcut>
-              </MenubarItem>
-              <MenubarSeparator />
-              <MenubarItem onSelect={saveProject}>
-                <Save className="size-4" /> Save <MenubarShortcut>⌘S</MenubarShortcut>
-              </MenubarItem>
-              <MenubarItem onSelect={saveProjectAs}>Save As…</MenubarItem>
-              <MenubarSeparator />
-              <MenubarSub>
-                <MenubarSubTrigger>Export</MenubarSubTrigger>
-                <MenubarSubContent>
-                  <MenubarItem onSelect={exportDxf}>DXF…</MenubarItem>
-                  <MenubarItem onSelect={() => exportRaster('png')}>PNG…</MenubarItem>
-                  <MenubarItem onSelect={() => exportRaster('jpg')}>JPG…</MenubarItem>
-                  <MenubarSeparator />
-                  <MenubarItem onSelect={exportTakeoff}>Takeoff CSV…</MenubarItem>
-                </MenubarSubContent>
-              </MenubarSub>
-              <MenubarSeparator />
-              <MenubarItem onSelect={solve} disabled={solving}>
-                Solve <MenubarShortcut>⏎</MenubarShortcut>
-              </MenubarItem>
-              <MenubarSeparator />
-              <MenubarItem onSelect={fit}>Fit to view</MenubarItem>
-            </MenubarContent>
-          </MenubarMenu>
-          <MenubarMenu>
-            <MenubarTrigger>View</MenubarTrigger>
-            <MenubarContent>
-              <MenubarCheckboxItem checked={showGrid} onCheckedChange={setShowGrid}>
-                Grid
-              </MenubarCheckboxItem>
-              <MenubarCheckboxItem checked={showRuler} onCheckedChange={setShowRuler}>
-                Rulers
-              </MenubarCheckboxItem>
-              <MenubarSeparator />
-              <MenubarItem onSelect={zoomIn}>Zoom in</MenubarItem>
-              <MenubarItem onSelect={zoomOut}>Zoom out</MenubarItem>
-              <MenubarItem onSelect={fit}>Reset zoom</MenubarItem>
-            </MenubarContent>
-          </MenubarMenu>
-          <MenubarMenu>
-            <MenubarTrigger>Help</MenubarTrigger>
-            <MenubarContent>
-              <MenubarItem
-                onSelect={() =>
-                  window.alert(
-                    'plotplan-fit-me — generative plot plan tool.\nDrag equipment for a live score, or Solve to auto-lay-out.',
-                  )}
-              >
-                <Info className="size-4" /> About
-              </MenubarItem>
-            </MenubarContent>
-          </MenubarMenu>
-        </Menubar>
-      </div>
-
       <Tabs defaultValue="home" className="ribbon-tabs gap-0">
-        <TabsList variant="line" className="ribbon-tablist">
-          <TabsTrigger value="home">Home</TabsTrigger>
-          <TabsTrigger value="view">View</TabsTrigger>
-        </TabsList>
+        {/* single Word-style row: File menu, the ribbon tabs, then Help menu
+            pushed to the right — no separate menu-bar strip above the tabs. */}
+        <div className="ribbon-tabrow">
+          <LayoutGrid className="app-icon" />
+          <Menubar className="titlebar-menubar border-0 bg-transparent p-0 shadow-none">
+            <MenubarMenu>
+              <MenubarTrigger>File</MenubarTrigger>
+              <MenubarContent>
+                <MenubarItem onSelect={newProject}>
+                  <FilePlus className="size-4" /> New <MenubarShortcut>⌘N</MenubarShortcut>
+                </MenubarItem>
+                <MenubarItem onSelect={() => openInputRef.current?.click()}>
+                  <FileUp className="size-4" /> Open… <MenubarShortcut>⌘O</MenubarShortcut>
+                </MenubarItem>
+                <MenubarSeparator />
+                <MenubarItem onSelect={saveProject}>
+                  <Save className="size-4" /> Save <MenubarShortcut>⌘S</MenubarShortcut>
+                </MenubarItem>
+                <MenubarItem onSelect={saveProjectAs}>Save As…</MenubarItem>
+                <MenubarSeparator />
+                <MenubarSub>
+                  <MenubarSubTrigger>Export</MenubarSubTrigger>
+                  <MenubarSubContent>
+                    <MenubarItem onSelect={exportDxf}>DXF…</MenubarItem>
+                    <MenubarItem onSelect={() => exportRaster('png')}>PNG…</MenubarItem>
+                    <MenubarItem onSelect={() => exportRaster('jpg')}>JPG…</MenubarItem>
+                    <MenubarSeparator />
+                    <MenubarItem onSelect={exportTakeoff}>Takeoff CSV…</MenubarItem>
+                  </MenubarSubContent>
+                </MenubarSub>
+              </MenubarContent>
+            </MenubarMenu>
+          </Menubar>
+
+          <TabsList variant="line" className="ribbon-tablist">
+            <TabsTrigger value="home">Home</TabsTrigger>
+            <TabsTrigger value="insert">Insert</TabsTrigger>
+            <TabsTrigger value="view">View</TabsTrigger>
+          </TabsList>
+
+          <Menubar className="titlebar-menubar ml-auto border-0 bg-transparent p-0 shadow-none">
+            <MenubarMenu>
+              <MenubarTrigger>Help</MenubarTrigger>
+              <MenubarContent align="end">
+                <MenubarItem
+                  onSelect={() =>
+                    window.alert(
+                      'plotplan-fit-me — generative plot plan tool for refinery/petrochemical unit '
+                      + 'layout.\n\nPick a Case Study (or File > New), drag equipment for a live '
+                      + 'score, or Solve to auto-lay-out. Insert > Draw lets you add roads and pipe '
+                      + 'racks directly on the canvas.',
+                    )}
+                >
+                  Plotplan Fit Me Help
+                </MenubarItem>
+                <MenubarItem
+                  onSelect={() => window.alert('Plotplan Fit Me\nGenerative plot plan layout tool.')}
+                >
+                  <Info className="size-4" /> About
+                </MenubarItem>
+              </MenubarContent>
+            </MenubarMenu>
+          </Menubar>
+        </div>
 
         <TabsContent value="home" className="ribbon-body">
           <Group label="Case Study">
@@ -233,6 +225,27 @@ export default function Ribbon(props) {
             </Select>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
+          <Group label="Tools">
+            <ToggleGroup type="single" variant="outline" value={tool}
+              onValueChange={(v) => v && setTool(v)}
+            >
+              <ToggleGroupItem value="select" title="Select / Move"><MousePointer2 /></ToggleGroupItem>
+              <ToggleGroupItem value="pan" title="Pan"><Hand /></ToggleGroupItem>
+            </ToggleGroup>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
+          <Group label="Zoom">
+            <ZoomDialog zoomPct={zoomPct} setZoomPercent={setZoomPercent} />
+            <Button variant="outline" size="icon" onClick={fit} title="Fit width"><ArrowLeftRight /></Button>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
+          <Group label="Solve">
+            <Button onClick={solve} disabled={solving} className="solve-btn flex-col gap-1 px-4">
+              {solving ? <Loader2 className="size-5 animate-spin" /> : <Play className="size-5" />}
+            </Button>
+            <ResultsDialog results={results} />
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
           <Group label="Seeds">
             <div className="flex flex-col gap-1">
               <Input
@@ -241,12 +254,28 @@ export default function Ribbon(props) {
               />
             </div>
           </Group>
-          <Separator orientation="vertical" className="h-auto" />
-          <Group label="Solve">
-            <Button onClick={solve} disabled={solving} className="solve-btn h-14 flex-col gap-1 px-4">
-              {solving ? <Loader2 className="size-5 animate-spin" /> : <Play className="size-5" />}
+        </TabsContent>
+
+        <TabsContent value="insert" className="ribbon-body">
+          <Group label="Draw">
+            <Button
+              variant={tool === 'draw-road' ? 'default' : 'outline'} size="icon"
+              onClick={() => { setTool('draw-road'); bumpDrawPrompt() }} title="Draw road"
+            >
+              <Route />
             </Button>
-            <ResultsDialog results={results} />
+            <Button
+              variant={tool === 'draw-rack' ? 'default' : 'outline'} size="icon"
+              onClick={() => { setTool('draw-rack'); bumpDrawPrompt() }} title="Draw pipe rack"
+            >
+              <Rows3 />
+            </Button>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
+          <Group label="Snap">
+            <Toggle variant="outline" pressed={snap} onPressedChange={setSnap} title="Snap to grid">
+              <Magnet />
+            </Toggle>
           </Group>
         </TabsContent>
 
@@ -268,7 +297,6 @@ export default function Ribbon(props) {
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Grid & ruler spacing">
             <div className="flex flex-col gap-1">
-              <Label htmlFor="gridstep" className="text-[11px] text-muted-foreground">meters/tick</Label>
               <div className="flex gap-1">
                 <Input
                   id="gridstep" type="number" min="0.1" step="1" placeholder="auto"
@@ -290,9 +318,6 @@ export default function Ribbon(props) {
               <ToggleGroupItem value="select" title="Select / drag"><MousePointer2 /></ToggleGroupItem>
               <ToggleGroupItem value="pan" title="Pan"><Hand /></ToggleGroupItem>
             </ToggleGroup>
-            <Toggle variant="outline" pressed={snap} onPressedChange={setSnap} title="Snap to grid">
-              <Magnet />
-            </Toggle>
           </Group>
         </TabsContent>
       </Tabs>

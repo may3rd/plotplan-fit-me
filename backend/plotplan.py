@@ -57,7 +57,6 @@ def min_gap(a: str, b: str, spacing: dict) -> float:
 class Site:
     w: float            # m, x extent (0..w)
     d: float            # m, y extent (0..d)
-    racks: list          # [(rack_y, rack_half), ...] — one or more parallel rack spines
     wind_dir: str = ""   # "x+"/"x-"/"y+"/"y-" — the side the prevailing wind blows FROM
                          # (upwind side of every fired_heater); "" = no wind constraint
 
@@ -107,14 +106,10 @@ def load_spacing(path: str) -> dict:
                 for r in csv.DictReader(f)}
 
 def load_site(path: str) -> Site:
-    # ponytail: same "grouped rows" convention as keepouts.csv — one row per
-    # rack spine. w/d/wind_dir only need to be present on the first row; a
-    # single-row file with no wind_dir column behaves exactly as before.
     with open(path, newline="") as f:
-        rows = list(csv.DictReader(f))
-    racks = [(float(r["rack_y"]), float(r["rack_half"])) for r in rows]
-    wind_dir = (rows[0].get("wind_dir") or "").strip()
-    return Site(float(rows[0]["w"]), float(rows[0]["d"]), racks, wind_dir)
+        row = next(csv.DictReader(f))
+    wind_dir = (row.get("wind_dir") or "").strip()
+    return Site(float(row["w"]), float(row["d"]), wind_dir)
 
 def load_keepouts(path: str) -> dict:
     """zone,x,y rows, grouped by zone name into ordered vertex lists."""
@@ -174,6 +169,22 @@ def _rect_hits_poly(x1, y1, x2, y2, poly: list) -> bool:
 def _rect_overlap(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) -> bool:
     return ax1 < bx2 and bx1 < ax2 and ay1 < by2 and by1 < ay2
 
+def _bbox(poly: list):
+    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+    return min(xs), min(ys), max(xs), max(ys)
+
+def _is_rack_zone(zone: str) -> bool:
+    return zone.upper().startswith("RACK")
+
+def _rack_zones(keepouts: dict):
+    """(zone, poly) pairs for pipe-rack zones — a rack is just a keepout
+    zone named RACK* (same naming-convention mechanism ROAD*/MAINT* already
+    use for their DXF layer, see _zone_layer()). Its bounding box is both
+    the corridor equipment must clear (already true for every keepout, no
+    rack-specific check needed) AND the piping-routing target (its
+    y-center is the rack spine connections rise to / drop from)."""
+    return [(z, poly) for z, poly in (keepouts or {}).items() if _is_rack_zone(z)]
+
 def _footprint(e: Equipment):
     return e.x - e.w / 2, e.y - e.d / 2, e.x + e.w / 2, e.y + e.d / 2
 
@@ -206,11 +217,10 @@ def feasible(eq: list, site: Site, spacing: dict, keepouts: dict = None) -> bool
         if not (e.w / 2 <= e.x <= site.w - e.w / 2 and
                 e.d / 2 <= e.y <= site.d - e.d / 2):
             return False
-        # keep-out: every rack corridor
-        if any(abs(e.y - ry) < rhalf + e.d / 2 for ry, rhalf in site.racks):
-            return False
-        # keep-out: named polygon zones (flare radius, blast contours,
-        # roads, maintenance corridors — all just zones in keepouts.csv)
+        # keep-out: named polygon zones — flare radius, blast contours,
+        # roads, maintenance corridors, AND pipe racks (a rack is just a
+        # zone named RACK* — see _rack_zones()), all just zones in
+        # keepouts.csv checked identically.
         x1, y1, x2, y2 = _footprint(e)
         for poly in (keepouts or {}).values():
             if _rect_hits_poly(x1, y1, x2, y2, poly):
@@ -229,8 +239,6 @@ def feasible(eq: list, site: Site, spacing: dict, keepouts: dict = None) -> bool
             continue
         x1, y1, x2, y2 = pr
         if not (0 <= x1 and x2 <= site.w and 0 <= y1 and y2 <= site.d):
-            return False
-        if any(y1 < ry + rhalf and y2 > ry - rhalf for ry, rhalf in site.racks):
             return False
         for poly in (keepouts or {}).values():
             if _rect_hits_poly(x1, y1, x2, y2, poly):
@@ -257,19 +265,28 @@ def feasible(eq: list, site: Site, spacing: dict, keepouts: dict = None) -> bool
                     return False
     return True
 
-def piping_cost(eq: list, conns: list, site: Site) -> float:
+def piping_cost(eq: list, conns: list, site: Site, keepouts: dict = None) -> float:
     # all lines route via a rack: rise to the rack, run along, drop. Each
-    # connection picks whichever rack spine gives it the shortest rise+drop
-    # (the run-along-x term is the same regardless of which rack, so it
-    # doesn't affect the choice).
+    # connection picks whichever rack zone's y-center gives it the shortest
+    # rise+drop (the run-along-x term is the same regardless of which rack,
+    # so it doesn't affect the choice). ponytail: doesn't check that either
+    # endpoint's x actually falls inside the chosen rack's x-extent — same
+    # simplification the old infinite-width racks made for free; upgrade to
+    # excluding/penalizing out-of-bounds routes if a real unit needs it.
+    racks = _rack_zones(keepouts)
+    if conns and not racks:
+        raise RuntimeError("no pipe rack zone defined (a keepouts zone named RACK*)")
     by_tag = {e.tag: e for e in eq}
     total = 0.0
     xs_by_rack = {}
     for a, b, w in conns:
         ea, eb = by_tag[a], by_tag[b]
-        ry = min((r for r, _ in site.racks), key=lambda r: abs(ea.y - r) + abs(eb.y - r))
+        zone, ry = min(
+            ((z, (_bbox(poly)[1] + _bbox(poly)[3]) / 2) for z, poly in racks),
+            key=lambda zr: abs(ea.y - zr[1]) + abs(eb.y - zr[1]),
+        )
         total += w * (abs(ea.y - ry) + abs(ea.x - eb.x) + abs(eb.y - ry))
-        xs_by_rack.setdefault(ry, []).extend([ea.x, eb.x])
+        xs_by_rack.setdefault(zone, []).extend([ea.x, eb.x])
     # rack steel: only the racks actually used need physical span costed.
     total += RACK_STEEL_COST_PER_M * sum(max(xs) - min(xs) for xs in xs_by_rack.values())
     return total
@@ -298,7 +315,7 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
     rng = random.Random(seed)
     if not random_place(eq, site, spacing, rng, keepouts):
         raise RuntimeError("no feasible initial layout — site too small for spacing table")
-    cost = piping_cost(eq, conns, site)
+    cost = piping_cost(eq, conns, site, keepouts)
     best = cost
     best_pos = [(e.x, e.y, e.w, e.d) for e in eq]
     for k in range(iters):
@@ -322,7 +339,7 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
             else:
                 e.x, e.y = ox, oy
             continue
-        new = piping_cost(eq, conns, site)
+        new = piping_cost(eq, conns, site, keepouts)
         if new < cost or rng.random() < math.exp((cost - new) / t):
             cost = new
             if cost < best:
@@ -362,13 +379,20 @@ def _g_floor(meters: float, grid_m: float) -> int:
     return math.floor(meters / grid_m + 1e-9)
 
 # ponytail: CP-SAT is free to place a solution exactly touching a clearance
-# boundary (its constraints are non-strict <=/>=); feasible()'s check is
-# strict (`<`), so floating-point noise right at an exact-equality boundary
-# can flip the verdict after decoding back to real meters. Padding every
-# required minimum (gaps, rack half-width, pull/wind clearance) by this
-# margin before ceiling means the modeled requirement is always a hair
-# stricter than the real one — decoded solutions clear feasible()'s check
-# with room to spare instead of landing exactly on its floating-point edge.
+# boundary (its constraints are non-strict <=/>=). Two distinct reasons
+# that can flip feasible()'s verdict after decoding back to real meters:
+# (1) a strict (`<`) real check (pairwise gap, pull/wind clearance) vs
+# CP-SAT's non-strict model — floating-point noise at exact equality can
+# land on the wrong side; (2) feasible()'s keep-out check (_rect_hits_poly,
+# racks included) is non-strict too, but its ray-casting point-in-polygon
+# test is ambiguous for a query point exactly ON a zone edge/vertex —
+# measured to matter in practice for rack zones specifically, since the
+# piping-cost objective actively pulls equipment flush against a rack's
+# edge. Padding every required minimum (gaps, keep-out/rack boxes,
+# pull/wind clearance) by this margin before floor/ceil means the modeled
+# requirement is always a hair stricter than the real one — decoded
+# solutions clear feasible()'s check with room to spare instead of landing
+# exactly on its boundary.
 CPSAT_EPS_M = 0.01
 
 def _cpsat_no_overlap(model, a, b, gap_grid: int, name: str):
@@ -389,29 +413,20 @@ def _cpsat_no_overlap(model, a, b, gap_grid: int, name: str):
     model.Add(by2 + gap_grid <= ay1).OnlyEnforceIf(above)
     model.AddBoolOr([left, right, below, above])
 
-def _cpsat_avoid_band(model, bottom, top, lo: int, hi: int, name: str):
-    """Require [bottom, top] fully outside [lo, hi] (a rack corridor, already
-    expanded outward to a superset of the real corridor)."""
-    below = model.NewBoolVar(f"{name}_below")
-    above = model.NewBoolVar(f"{name}_above")
-    model.Add(top <= lo).OnlyEnforceIf(below)
-    model.Add(bottom >= hi).OnlyEnforceIf(above)
-    model.AddBoolOr([below, above])
-
 def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
                  seed: int = 0, time_limit_s: float = 20.0, grid_m: float = CPSAT_GRID_M) -> float:
     """CP-SAT layout solver — same feasibility rules as feasible()/_check()
-    (site bounds, rack corridors, keep-out zones, pairwise class spacing,
-    tube-pull clearance, prevailing wind, pinned equipment), reformulated as
-    linear/disjunctive constraints on a grid_m-meter grid. Returns the same
-    real (continuous, un-rounded) piping_cost() as solve() — see the
-    ponytail notes below for the two things this simplifies relative to the
-    SA solver.
-    ponytail: keep-out zones use their axis-aligned bounding box, not the
-    exact polygon — exact for this repo's zones (all rectangles; see
-    keepouts.csv), conservative (larger exclusion) for a genuinely concave
-    zone. Upgrade to per-edge half-plane constraints if a real unit ships a
-    non-rectangular zone this wrongly rejects.
+    (site bounds, keep-out zones — pipe racks included, they're just a
+    zone named RACK* — pairwise class spacing, tube-pull clearance,
+    prevailing wind, pinned equipment), reformulated as linear/disjunctive
+    constraints on a grid_m-meter grid. Returns the same real (continuous,
+    un-rounded) piping_cost() as solve() — see the ponytail notes below for
+    the two things this simplifies relative to the SA solver.
+    ponytail: keep-out zones (racks included) use their axis-aligned
+    bounding box, not the exact polygon — exact for this repo's zones (all
+    rectangles; see keepouts.csv), conservative (larger exclusion) for a
+    genuinely concave zone. Upgrade to per-edge half-plane constraints if a
+    real unit ships a non-rectangular zone this wrongly rejects.
     ponytail: the objective minimizes pipe rise+run+drop (the dominant
     term) but not piping_cost()'s rack-steel-span term — exactly modeling
     "x-span of only the items actually routed onto a used rack" needs
@@ -422,6 +437,9 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
     """
     spacing = DEFAULT_SPACING if spacing is None else spacing
     keepouts = keepouts or {}
+    rack_zones = _rack_zones(keepouts)
+    if conns and not rack_zones:
+        raise RuntimeError("no pipe rack zone defined (a keepouts zone named RACK*)")
     G = grid_m
     pinned = [e for e in eq if e.pinned]
     if pinned and not feasible(pinned, site, spacing, keepouts):
@@ -430,13 +448,23 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
     model = cp_model.CpModel()
     site_w = _g_floor(site.w, G)
     site_d = _g_floor(site.d, G)
-    racks = [(_g_floor(ry - rhalf - CPSAT_EPS_M, G), _g_ceil(ry + rhalf + CPSAT_EPS_M, G))
-              for ry, rhalf in site.racks]
+    # keep-out boxes (racks included — they're keepouts zones like any
+    # other), padded outward by CPSAT_EPS_M. Both _cpsat_no_overlap's gap=0
+    # separation and feasible()'s _rect_hits_poly are non-strict at a
+    # glance, but _rect_hits_poly's ray-casting point-in-polygon check is
+    # ambiguous for a query point exactly ON a polygon edge/vertex — and a
+    # rack zone (unlike most keepouts) actively attracts CP-SAT solutions
+    # flush against its edge, since hugging the rack minimizes rise/drop in
+    # the objective. Measured: without this padding, solve_cpsat regularly
+    # returns equipment exactly touching a rack edge that _check() then
+    # flags as a keepout hit. Padding outward before flooring/ceiling keeps
+    # decoded solutions clear of every zone with real margin, same
+    # reasoning as the pairwise-gap and pull/wind-clearance padding below.
     kboxes = []
     for poly in keepouts.values():
-        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
-        kboxes.append((_g_floor(min(xs), G), _g_floor(min(ys), G),
-                        _g_ceil(max(xs), G), _g_ceil(max(ys), G)))
+        x1, y1, x2, y2 = _bbox(poly)
+        kboxes.append((_g_floor(x1 - CPSAT_EPS_M, G), _g_floor(y1 - CPSAT_EPS_M, G),
+                        _g_ceil(x2 + CPSAT_EPS_M, G), _g_ceil(y2 + CPSAT_EPS_M, G)))
 
     L, B, FW, FD, ROT = {}, {}, {}, {}, {}
     for e in eq:
@@ -466,8 +494,6 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
             model.Add(l + fw <= site_w)
             model.Add(b + fd <= site_d)
         L[e.tag], B[e.tag], FW[e.tag], FD[e.tag] = l, b, fw, fd
-        for i, (lo, hi) in enumerate(racks):
-            _cpsat_avoid_band(model, b, b + fd, lo, hi, f"rack{i}_{e.tag}")
         for i, box in enumerate(kboxes):
             _cpsat_no_overlap(model, (l, b, l + fw, b + fd), box, 0, f"keep{i}_{e.tag}")
 
@@ -479,7 +505,8 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
             b = (L[ej.tag], B[ej.tag], L[ej.tag] + FW[ej.tag], B[ej.tag] + FD[ej.tag])
             _cpsat_no_overlap(model, a, b, gap, f"sp{i}_{j}")
 
-    # tube-pull clearance: swept rectangle vs site bounds/racks/keepouts/every other footprint
+    # tube-pull clearance: swept rectangle vs site bounds/keepouts (racks
+    # included)/every other footprint
     for e in eq:
         if not e.pull_side or e.pull_len <= 0:
             continue
@@ -496,8 +523,6 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
         px1, py1, px2, py2 = pr
         model.Add(px1 >= 0); model.Add(px2 <= site_w)
         model.Add(py1 >= 0); model.Add(py2 <= site_d)
-        for i, (lo, hi) in enumerate(racks):
-            _cpsat_avoid_band(model, py1, py2, lo, hi, f"pullrack{i}_{e.tag}")
         for i, box in enumerate(kboxes):
             _cpsat_no_overlap(model, pr, box, 0, f"pullkeep{i}_{e.tag}")
         for other in eq:
@@ -531,7 +556,7 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
     site_d2 = 2 * site_d
     cx2 = {tag: 2 * L[tag] + FW[tag] for tag in L}
     cy2 = {tag: 2 * B[tag] + FD[tag] for tag in L}
-    rack_y2 = [round(2 * ry / G) for ry, _ in site.racks]
+    rack_y2 = [round((_bbox(poly)[1] + _bbox(poly)[3]) / G) for _, poly in rack_zones]
     terms = []
     for idx, (a_tag, b_tag, weight) in enumerate(conns):
         run = model.NewIntVar(0, 2 * site_w, f"run{idx}")
@@ -539,7 +564,7 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
         model.Add(run >= cx2[b_tag] - cx2[a_tag])
         rise = model.NewIntVar(0, site_d2, f"rise{idx}")
         drop = model.NewIntVar(0, site_d2, f"drop{idx}")
-        choose = [model.NewBoolVar(f"choose{idx}_{k}") for k in range(len(site.racks))]
+        choose = [model.NewBoolVar(f"choose{idx}_{k}") for k in range(len(rack_zones))]
         model.Add(sum(choose) == 1)
         for k, ry2 in enumerate(rack_y2):
             model.Add(rise >= cy2[a_tag] - ry2).OnlyEnforceIf(choose[k])
@@ -565,7 +590,7 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
         x = solver.Value(L[e.tag]) * G + w / 2
         y = solver.Value(B[e.tag]) * G + d / 2
         e.x, e.y, e.w, e.d = x, y, w, d
-    return piping_cost(eq, conns, site)
+    return piping_cost(eq, conns, site, keepouts)
 
 # --------------------------------------------------------------- DXF writer
 # ponytail: hand-rolled DXF R12 (plain text) — ezdxf not needed for lines+text.
@@ -577,10 +602,13 @@ def _text(f, x, y, h, s, layer):
     f.write(f"0\nTEXT\n8\n{layer}\n10\n{x}\n20\n{y}\n40\n{h}\n1\n{s}\n")
 
 def _zone_layer(zone: str) -> str:
-    # ponytail: naming convention, not a new mechanism — a "road" or
-    # "maintenance corridor" is just a keepout zone. Prefix the zone name
-    # to pick which layer it draws on; anything else is a generic keepout.
+    # ponytail: naming convention, not a new mechanism — a "road", "pipe
+    # rack", or "maintenance corridor" is just a keepout zone. Prefix the
+    # zone name to pick which layer it draws on; anything else is a
+    # generic keepout.
     z = zone.upper()
+    if z.startswith("RACK"):
+        return "RACK"
     if z.startswith("ROAD"):
         return "ROADS"
     if z.startswith("MAINT"):
@@ -594,13 +622,7 @@ def write_dxf(path: str, eq: list, site: Site, keepouts: dict = None):
         for (x1, y1), (x2, y2) in [((0, 0), (site.w, 0)), ((site.w, 0), (site.w, site.d)),
                                    ((site.w, site.d), (0, site.d)), ((0, site.d), (0, 0))]:
             _line(f, x1, y1, x2, y2, "SITE")
-        # rack corridors
-        for i, (ry, rhalf) in enumerate(site.racks):
-            for y in (ry - rhalf, ry + rhalf):
-                _line(f, 0, y, site.w, y, "RACK")
-            label = "PIPE RACK" if len(site.racks) == 1 else f"PIPE RACK {i + 1}"
-            _text(f, 1, ry - 0.6, 1.2, label, "RACK")
-        # keep-out / road / maintenance zones
+        # keep-out / road / pipe-rack / maintenance zones
         for zone, poly in (keepouts or {}).items():
             layer = _zone_layer(zone)
             n = len(poly)
@@ -636,10 +658,11 @@ def write_dxf(path: str, eq: list, site: Site, keepouts: dict = None):
 # helper, since the cross-check below (`piping_cost(...) == cost`) is the
 # thing that catches formula drift if these two ever disagree.
 
-def write_takeoff(path: str, eq: list, conns: list, site: Site) -> None:
+def write_takeoff(path: str, eq: list, conns: list, site: Site, keepouts: dict = None) -> None:
     """Write per-connection pipe length (m), per-rack steel span actually
     used, and total pipe length, in the sample format:
     type,a,b,weight,length_m."""
+    racks = _rack_zones(keepouts)
     by_tag = {e.tag: e for e in eq}
     total_pipe_m = 0.0
     xs_by_rack = {}
@@ -648,14 +671,17 @@ def write_takeoff(path: str, eq: list, conns: list, site: Site) -> None:
         w.writerow(["type", "a", "b", "weight", "length_m"])
         for a, b, weight in conns:
             ea, eb = by_tag[a], by_tag[b]
-            ry = min((r for r, _ in site.racks), key=lambda r: abs(ea.y - r) + abs(eb.y - r))
+            zone, ry = min(
+                ((z, (_bbox(poly)[1] + _bbox(poly)[3]) / 2) for z, poly in racks),
+                key=lambda zr: abs(ea.y - zr[1]) + abs(eb.y - zr[1]),
+            )
             length = abs(ea.y - ry) + abs(ea.x - eb.x) + abs(eb.y - ry)
             w.writerow(["pipe", a, b, f"{weight:g}", f"{length:.2f}"])
             total_pipe_m += length
-            xs_by_rack.setdefault(ry, []).extend([ea.x, eb.x])
-        for ry in sorted(xs_by_rack):
-            span = max(xs_by_rack[ry]) - min(xs_by_rack[ry])
-            w.writerow(["rack_span_used", "", f"y={ry:g}", "", f"{span:.2f}"])
+            xs_by_rack.setdefault(zone, []).extend([ea.x, eb.x])
+        for zone in sorted(xs_by_rack):
+            span = max(xs_by_rack[zone]) - min(xs_by_rack[zone])
+            w.writerow(["rack_span_used", "", zone, "", f"{span:.2f}"])
         w.writerow(["total_pipe_length_m", "", "", "", f"{total_pipe_m:.2f}"])
 
 # ------------------------------------------------------------------- runner
@@ -677,8 +703,6 @@ def _check(eq: list, site: Site, spacing: dict, keepouts: dict = None, pinned_be
         px1, py1, px2, py2 = pr
         assert 0 <= px1 and px2 <= site.w and 0 <= py1 and py2 <= site.d, \
             f"{e.tag} pull clearance extends outside site"
-        assert not any(py1 < ry + rhalf and py2 > ry - rhalf for ry, rhalf in site.racks), \
-            f"{e.tag} pull clearance crosses a rack corridor"
         for zone, poly in (keepouts or {}).items():
             assert not _rect_hits_poly(px1, py1, px2, py2, poly), \
                 f"{e.tag} pull clearance overlaps keepout {zone}"
@@ -746,10 +770,10 @@ def run(data_dir: str, seeds, out_dxf="plotplan.dxf", out_takeoff="plotplan_take
             marker = "  <- best" if seed == results[0][0] else ""
             print(f"{seed:4d}  {cost:.0f}{marker}")
     best_cost, best_eq, best_conns, best_site, best_keepouts = best
-    assert abs(piping_cost(best_eq, best_conns, best_site) - best_cost) < 1e-6, \
+    assert abs(piping_cost(best_eq, best_conns, best_site, best_keepouts) - best_cost) < 1e-6, \
         "takeoff's pipe-length formula disagrees with piping_cost — check for drift"
     write_dxf(out_dxf, best_eq, best_site, best_keepouts)
-    write_takeoff(out_takeoff, best_eq, best_conns, best_site)
+    write_takeoff(out_takeoff, best_eq, best_conns, best_site, best_keepouts)
     print(f"piping cost score: {best_cost:.0f}  (seed {results[0][0]}, wrote {out_dxf}, {out_takeoff})")
     for e in sorted(best_eq, key=lambda q: q.tag):
         print(f"  {e.tag:6s} ({e.x:5.1f}, {e.y:5.1f})")
