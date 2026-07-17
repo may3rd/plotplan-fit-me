@@ -27,11 +27,15 @@ function App() {
   const [showRuler, setShowRuler] = useState(true)
   const [gridStep, setGridStep] = useState(null) // meters/tick override; null = auto
   const [snap, setSnap] = useState(false)
-  const [tool, setTool] = useState('select')
+  const [tool, setTool] = useState('select') // 'select' | 'pan' | 'edit'
+  const editMode = tool === 'edit' // when 'edit', zones (road/rack/underground/other) are draggable on the canvas
   const [rackWidth, setRackWidth] = useState(8) // meters, pipe-rack width (preferences, later)
   const [roadWidth, setRoadWidth] = useState(6) // meters, road width (preferences, later)
   const [drawPromptNonce, setDrawPromptNonce] = useState(0) // bump to (re)open the road/rack width prompt
   const bumpDrawPrompt = useCallback(() => setDrawPromptNonce((n) => n + 1), [])
+  const [editPromptNonce, setEditPromptNonce] = useState(0) // bump to open the selected zone's edit dialog
+  const bumpEditPrompt = useCallback(() => setEditPromptNonce((n) => n + 1), [])
+  const [selectedZone, setSelectedZone] = useState(null) // currently selected keep-out/road/rack zone
   const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
   const fittedFor = useRef(null)
 
@@ -113,6 +117,27 @@ function App() {
       return { ...d, keepouts }
     })
   }, [])
+
+  // edit a keepouts zone: update its polygon (drag a vertex) and/or rename it
+  // (which changes its role/layer per the backend's zone-name convention).
+  const editZone = useCallback((name, poly, nextName) => {
+    setData((d) => {
+      const keepouts = { ...d.keepouts }
+      if (nextName && nextName !== name) {
+        delete keepouts[name]
+        keepouts[nextName] = poly
+      } else {
+        keepouts[name] = poly
+      }
+      return { ...d, keepouts }
+    })
+  }, [])
+
+  // Ribbon's Delete button: remove the selected zone and clear the selection.
+  const deleteSelectedZone = useCallback((name) => {
+    deleteZone(name)
+    setSelectedZone(null)
+  }, [deleteZone])
 
   const zoomCenter = useCallback((factor) => {
     if (!csize?.width) return
@@ -249,6 +274,7 @@ function App() {
         gridStep={gridStep} setGridStep={setGridStep}
         snap={snap} setSnap={setSnap}
         tool={tool} setTool={setTool} bumpDrawPrompt={bumpDrawPrompt} fit={fit}
+        bumpEditPrompt={bumpEditPrompt} selectedZone={selectedZone} deleteZone={deleteSelectedZone}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
         newProject={newProject} openProject={openProject}
         saveProject={saveProject} saveProjectAs={saveProjectAs}
@@ -260,11 +286,14 @@ function App() {
           data={data} positions={positions} onPositions={onPositions}
           view={view} setView={setView}
           showGrid={showGrid} showRuler={showRuler} gridStep={gridStep} snap={snap} tool={tool} setTool={setTool}
+          editMode={editMode}
           rackWidth={rackWidth} setRackWidth={setRackWidth}
           roadWidth={roadWidth} setRoadWidth={setRoadWidth}
           drawPromptNonce={drawPromptNonce}
+          editPromptNonce={editPromptNonce}
           onCursor={setCursor} onSize={setCsize}
-          onAddZone={addZone} onDeleteZone={deleteZone}
+          onAddZone={addZone} onDeleteZone={deleteZone} onEditZone={editZone}
+          selectedZone={selectedZone} setSelectedZone={setSelectedZone}
         />
       </main>
 

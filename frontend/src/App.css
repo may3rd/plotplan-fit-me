@@ -112,10 +112,6 @@
   border-radius: var(--radius-sm);
 }
 
-.ribbon-group:hover {
-  background: color-mix(in oklch, var(--office-accent) 8%, transparent);
-}
-
 .ribbon-group-body {
   display: flex;
   flex: 1;
@@ -127,6 +123,15 @@
   font-size: 11px;
   line-height: 1;
   color: var(--muted-foreground);
+}
+
+/* active tool in the ribbon Tools group (Select / Pan / Edit) — blue,
+   thicker border so the current mode is obvious at a glance. */
+.ribbon-group [data-slot='toggle-group-item'][data-state='on'] {
+  border-color: var(--office-accent);
+  border-width: 2px;
+  color: var(--office-accent);
+  background: color-mix(in oklch, var(--office-accent) 12%, transparent);
 }
 
 .solve-btn {
@@ -246,6 +251,13 @@
   cursor: grab;
 }
 
+/* Pan mode: the whole canvas (including equipment/zones) shows the hand,
+   since the only action is moving the view. */
+.plot[data-tool='pan'] .equip,
+.plot[data-tool='pan'] .zone {
+  cursor: grab;
+}
+
 .plot[data-tool='draw-road'],
 .plot[data-tool='draw-rack'] {
   cursor: crosshair;
@@ -291,11 +303,21 @@
   pointer-events: none;
 }
 
+.plot[data-tool='edit'] .zone {
+  cursor: move;
+}
+
+.plot[data-tool='edit'] .equip {
+  cursor: not-allowed;
+}
+
 .zone {
   fill-opacity: 0.25;
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
-  cursor: pointer;
+  /* zones are inert in Select mode (only equipment is selectable there);
+     they get a move cursor in Edit mode via the rule above. */
+  cursor: default;
 }
 
 .zone.keepout {
@@ -324,6 +346,40 @@
   stroke: #2563eb;
   stroke-width: 2.5;
   stroke-dasharray: 2 1;
+}
+
+.zone-vert {
+  fill: #fff;
+  stroke: #2563eb;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+}
+
+.zone-vert:hover {
+  fill: #2563eb;
+}
+
+/* edge midpoint handle (round) — drag to expand/shrink that side. The
+   cursor is set per edge direction (.ew / .ns) so a horizontal side shows
+   the up/down resize arrow and a vertical side shows left/right. */
+.zone-edge {
+  fill: #2563eb;
+  stroke: #fff;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.zone-edge.ew {
+  cursor: ew-resize;
+}
+
+.zone-edge.ns {
+  cursor: ns-resize;
+}
+
+.zone-edge:hover {
+  fill: #1d4ed8;
 }
 
 .zone-label {
@@ -397,7 +453,7 @@
 }
 
 .measure-label {
-  font-size: 2px;
+  font-size: 1.4px;
   font-weight: 600;
   text-anchor: middle;
   fill: #2c7a3d;
@@ -416,4 +472,18 @@
 
 .measure.violating .measure-label {
   fill: #c0392b;
+}
+
+/* live width×height readout shown while resizing a zone (dragging a vertex
+   or edge midpoint) — blue, with a white halo like the measure label. */
+.zone-dim-label {
+  font-size: 1.4px;
+  font-weight: 600;
+  text-anchor: middle;
+  fill: #2563eb;
+  paint-order: stroke fill;
+  stroke: #fff;
+  stroke-width: 0.5px;
+  stroke-linejoin: round;
+  pointer-events: none;
 }

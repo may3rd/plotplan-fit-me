@@ -7,6 +7,9 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
 
 const CLASS_COLOR = {
   fired_heater: '#e05a47',
@@ -18,11 +21,31 @@ const CLASS_COLOR = {
 
 const RULER = 26 // px thickness of each ruler strip
 const RACK_HATCH_SPACING = 4 // meters between pipe-rack cross-tie lines
+const SOFT_SNAP_M = 1.0 // soft-snap to the site border when a dragged point is within this many meters
+
+// Soft-snap a world coordinate to the nearest site border (0 or the site's
+// extent on that axis) when it's within SOFT_SNAP_M, otherwise leave it. Used
+// while dragging/resizing zones so a side can drop flush against the site edge.
+function softBorder(val, low, high) {
+  if (Math.abs(val - low) < SOFT_SNAP_M) return low
+  if (Math.abs(val - high) < SOFT_SNAP_M) return high
+  return val
+}
 
 // tool -> the zone-name prefix it draws (see backend plotplan._rack_zones /
 // _zone_layer — a zone's name prefix is the only thing that decides its
-// role, "RACK"/"ROAD" here mirror that same convention).
-const DRAW_PREFIX = { 'draw-road': 'ROAD', 'draw-rack': 'RACK' }
+// role/layer; "RACK"/"ROAD"/"MAINT" mirror that same convention, while
+// "UNDERGROUND"/"KEEPOUT" stay generic keep-out zones).
+const DRAW_KINDS = {
+  road: { prefix: 'ROAD', label: 'Road' },
+  rack: { prefix: 'RACK', label: 'Pipe Rack' },
+  maint: { prefix: 'MAINT', label: 'Maintenance' },
+  underground: { prefix: 'UNDERGROUND', label: 'Underground' },
+  keepout: { prefix: 'KEEPOUT', label: 'Keep-out' },
+}
+const DRAW_PREFIX = Object.fromEntries(
+  Object.entries(DRAW_KINDS).map(([k, v]) => [`draw-${k}`, v.prefix]),
+)
 
 function svgPoint(svg, clientX, clientY) {
   const pt = svg.createSVGPoint()
@@ -108,7 +131,8 @@ function centerlineRect(start, end, width) {
 export default function PlotCanvas({
   data, positions, onPositions, view, setView, showGrid, showRuler, gridStep, snap, tool, setTool,
   rackWidth, setRackWidth, roadWidth, setRoadWidth, drawPromptNonce,
-  onCursor, onSize, onAddZone, onDeleteZone,
+  editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone,
+  selectedZone, setSelectedZone, editMode,
 }) {
   const { equipment, connections, site, keepouts, spacing, wind_clearance_m: windClearanceM } = data
   const byTag = Object.fromEntries(equipment.map((e) => [e.tag, e]))
@@ -118,19 +142,30 @@ export default function PlotCanvas({
   // roads and pipe racks share the exact same two-click centerline+width
   // draw interaction (see DRAW_PREFIX) — only the width preference, zone
   // name prefix, and rendered style (hatch/label/color) differ per kind.
-  const drawKind = tool === 'draw-rack' ? 'rack' : tool === 'draw-road' ? 'road' : null
-  const drawWidth = drawKind === 'rack' ? rackWidth : roadWidth
-  const setDrawWidth = drawKind === 'rack' ? setRackWidth : setRoadWidth
+  const drawKind = tool.startsWith('draw-') ? tool.slice(5) : null
+  const drawDef = drawKind ? DRAW_KINDS[drawKind] : null
+  // roads and pipe racks remember their width in App prefs (rackWidth/
+  // roadWidth); other zone kinds keep a local default width.
+  const [otherWidth, setOtherWidth] = useState(8)
+  const drawWidth = drawKind === 'rack' ? rackWidth
+    : drawKind === 'road' ? roadWidth
+    : otherWidth
+  const setDrawWidth = drawKind === 'rack' ? setRackWidth
+    : drawKind === 'road' ? setRoadWidth
+    : setOtherWidth
 
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
   const dragTag = useRef(null)
   const pan = useRef(null) // {x, y} last client pos while panning
+  const dragZone = useRef(null) // {zone, offX, offY} while dragging a whole zone in edit mode
   const drawStart = useRef(null) // {x, y} world point where a zone-draw drag began
   const [measure, setMeasure] = useState(null) // live closest-neighbor readout while dragging
+  const [zoneDim, setZoneDim] = useState(null) // {w, h, cx, cy} live width×height while resizing a zone
   const [drawRect, setDrawRect] = useState(null) // live two-click centerline preview {x1,y1,x2,y2}
-  const [selectedZone, setSelectedZone] = useState(null)
+  const [dragVert, setDragVert] = useState(null) // {zone, index} | {zone, edge} while dragging a vertex/edge handle
+  const [editOpen, setEditOpen] = useState(false) // zone rename/role dialog
   const [drawPromptOpen, setDrawPromptOpen] = useState(false)
   const [drawPromptVal, setDrawPromptVal] = useState(String(drawWidth))
   const [zoneDrawing, setZoneDrawing] = useState(false) // true between the first and second click
@@ -196,10 +231,11 @@ export default function PlotCanvas({
       if (tag === 'INPUT' || tag === 'TEXTAREA') return
       onDeleteZone(selectedZone)
       setSelectedZone(null)
+      setEditOpen(false)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedZone, onDeleteZone])
+  }, [selectedZone, onDeleteZone, setSelectedZone])
 
   function reportCursor(ev) {
     const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
@@ -217,6 +253,15 @@ export default function PlotCanvas({
     setDrawPromptOpen(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawPromptNonce, drawKind])
+
+  // The ribbon's "Edit zone" button (or a double-click on the canvas) bumps
+  // editPromptNonce to open the selected zone's edit dialog. Only opens if a
+  // zone is actually selected.
+  useEffect(() => {
+    if (!selectedZone) return
+    setEditOpen(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editPromptNonce])
 
   function confirmDrawWidth() {
     const n = Number(drawPromptVal)
@@ -277,10 +322,11 @@ export default function PlotCanvas({
       }
       return
     }
-    if (tool === 'select') setSelectedZone(null)
+    if (tool === 'select' || tool === 'edit') setSelectedZone(null)
   }
 
   function onPointerDownEquip(tag, ev) {
+    // Equipment is selectable/movable only in Select mode.
     if (tool !== 'select' || byTag[tag].pinned) return
     ev.stopPropagation()
     dragTag.current = tag
@@ -288,9 +334,54 @@ export default function PlotCanvas({
   }
 
   function onPointerDownZone(zone, ev) {
-    if (tool !== 'select') return
+    // Zones are interactive only in Edit mode (select + move the whole
+    // polygon). In Select mode a click on a zone does nothing — only
+    // equipment is selectable there.
+    if (tool !== 'edit') return
     ev.stopPropagation()
     setSelectedZone(zone)
+    const poly = keepouts[zone] ?? []
+    const first = poly[0] ?? [0, 0]
+    const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+    // grab offset = first vertex - pointer (world), so the first vertex stays
+    // a fixed distance behind the cursor as it moves (no jump on first move).
+    const wy = site.d - p.y
+    dragZone.current = { zone, ox: first[0] - p.x, oy: first[1] - wy }
+    capture(ev)
+  }
+
+  function onPointerDownVert(zone, index, ev) {
+    // Reshape a zone by dragging a vertex — Edit mode only.
+    if (tool !== 'edit') return
+    ev.stopPropagation()
+    setSelectedZone(zone)
+    setDragVert({ zone, index })
+    capture(ev)
+  }
+
+  function onPointerDownEdge(zone, edge, ev) {
+    // Expand/shrink a zone by dragging the midpoint of an edge — both
+    // endpoints of that edge slide by the same delta (the opposite edge
+    // stays fixed). The slide is constrained to the edge's perpendicular
+    // (orthogonal) direction, so a side only moves in/out, never sideways.
+    // Edit mode only.
+    if (tool !== 'edit') return
+    ev.stopPropagation()
+    setSelectedZone(zone)
+    const poly = keepouts[zone] ?? []
+    const a = poly[edge] ?? [0, 0]
+    const b = poly[(edge + 1) % poly.length] ?? [0, 0]
+    const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+    // perpendicular axis: 'x' if the edge runs vertically (move left/right),
+    // 'y' if it runs horizontally (move up/down).
+    const perp = Math.abs(b[0] - a[0]) > Math.abs(b[1] - a[1]) ? 'y' : 'x'
+    setDragVert({
+      zone, edge,
+      ax: a[0], ay: a[1], bx: b[0], by: b[1],
+      px: p.x, py: site.d - p.y,
+      perp,
+    })
+    capture(ev)
   }
 
   function onPointerMove(ev) {
@@ -301,6 +392,72 @@ export default function PlotCanvas({
       const dy = ev.clientY - pan.current.y
       pan.current = { x: ev.clientX, y: ev.clientY }
       setView((v) => panBy(v, rect, dx, dy))
+      return
+    }
+    if (dragVert) {
+      const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+      let x = p.x
+      let y = site.d - p.y
+      if (snap) {
+        x = Math.round(x / xt.minorStep) * xt.minorStep
+        y = Math.round(y / yt.minorStep) * yt.minorStep
+      }
+      // soft-snap a dragged corner to the site border when close.
+      x = softBorder(x, 0, site.w)
+      y = softBorder(y, 0, site.d)
+      const cur = keepouts[dragVert.zone] ?? []
+      let poly
+      if (dragVert.edge !== undefined) {
+        // edge midpoint handle: translate both endpoints of edge `edge`
+        // (vertices `edge` and `edge+1`) by the same delta from the grab
+        // point, so the side slides in/out — expanding or shrinking the
+        // polygon along that edge. Only the perpendicular component of the
+        // drag is applied, so the side moves orthogonally only.
+        let dx = x - dragVert.px
+        let dy = y - dragVert.py
+        if (dragVert.perp === 'x') dy = 0
+        else dx = 0
+        const j = (dragVert.edge + 1) % cur.length
+        poly = cur.map((pt, i) => {
+          if (i === dragVert.edge) return [dragVert.ax + dx, dragVert.ay + dy]
+          if (i === j) return [dragVert.bx + dx, dragVert.by + dy]
+          return pt
+        })
+      } else {
+        // single vertex handle: move just that corner.
+        poly = cur.map((pt, i) => (i === dragVert.index ? [x, y] : pt))
+      }
+      onEditZone(dragVert.zone, poly)
+      const xs = poly.map((pt) => pt[0])
+      const ys = poly.map((pt) => pt[1])
+      setZoneDim({
+        w: Math.max(...xs) - Math.min(...xs),
+        h: Math.max(...ys) - Math.min(...ys),
+        cx: (Math.max(...xs) + Math.min(...xs)) / 2,
+        cy: (Math.max(...ys) + Math.min(...ys)) / 2,
+      })
+      return
+    }
+    if (dragZone.current) {
+      const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+      let x = p.x + dragZone.current.ox
+      let y = (site.d - p.y) + dragZone.current.oy
+      if (snap) {
+        x = Math.round(x / xt.minorStep) * xt.minorStep
+        y = Math.round(y / yt.minorStep) * yt.minorStep
+      }
+      // soft-snap the dragged zone to the site border when its first vertex
+      // gets close — drops the whole polygon flush against an edge.
+      x = softBorder(x, 0, site.w)
+      y = softBorder(y, 0, site.d)
+      const { zone, ox, oy } = dragZone.current
+      const poly = keepouts[zone] ?? []
+      const first = poly[0] ?? [0, 0]
+      const dxw = x - first[0]
+      const dyw = y - first[1]
+      onEditZone(zone, poly.map(([vx, vy]) => [vx + dxw, vy + dyw]))
+      // keep the grab offset relative to the (now moved) first vertex
+      dragZone.current = { zone, ox, oy }
       return
     }
     if (drawStart.current) {
@@ -331,9 +488,20 @@ export default function PlotCanvas({
   function onPointerUp() {
     pan.current = null
     dragTag.current = null
+    dragZone.current = null
+    setDragVert(null)
     setMeasure(null)
+    setZoneDim(null)
     // A road/rack draw is committed by the second click (onPointerDownBg),
     // not by releasing the pointer — nothing else to do here.
+  }
+
+  function onDoubleClickZone(zone, ev) {
+    // Open the rename/role dialog — Edit mode only.
+    if (tool !== 'edit') return
+    ev.stopPropagation()
+    setSelectedZone(zone)
+    setEditOpen(true)
   }
 
   const pxX = (wx) => ((wx - v.x) / v.w) * size.width
@@ -374,6 +542,7 @@ export default function PlotCanvas({
           ref={svgRef}
           className="plot"
           data-tool={tool}
+          data-edit={editMode ? 'on' : 'off'}
           width="100%"
           height="100%"
           viewBox={`${v.x} ${v.y} ${v.w} ${v.h}`}
@@ -384,7 +553,7 @@ export default function PlotCanvas({
           onPointerLeave={() => onCursor(null)}
         >
           {showGrid && (
-            <g className="grid-minor">
+            <g className="grid-minor" clipPath="url(#site-clip)">
               {xt.minorOut.map((wx) => (
                 <line key={`gxm${wx}`} x1={wx} y1={v.y} x2={wx} y2={v.y + v.h} />
               ))}
@@ -394,7 +563,7 @@ export default function PlotCanvas({
             </g>
           )}
           {showGrid && (
-            <g className="grid">
+            <g className="grid" clipPath="url(#site-clip)">
               {xt.out.map((wx) => (
                 <line key={`gx${wx}`} x1={wx} y1={v.y} x2={wx} y2={v.y + v.h} />
               ))}
@@ -403,6 +572,10 @@ export default function PlotCanvas({
               ))}
             </g>
           )}
+
+          <clipPath id="site-clip" clipPathUnits="userSpaceOnUse">
+            <rect x={0} y={0} width={site.w} height={site.d} />
+          </clipPath>
 
           <rect x={0} y={0} width={site.w} height={site.d} className="site" />
 
@@ -413,18 +586,49 @@ export default function PlotCanvas({
               : upper.startsWith('MAINT') ? 'maint' : 'keepout'
             const [cx, cy] = centroid(poly)
             const hatch = kind === 'rack' ? rackHatchSegments(poly, RACK_HATCH_SPACING) : []
+            const selected = selectedZone === zone
             return (
               <g key={zone}>
                 <polygon
                   points={poly.map(([x, y]) => `${x},${toY(y)}`).join(' ')}
-                  className={`zone ${kind} ${selectedZone === zone ? 'selected' : ''}`}
+                  className={`zone ${kind} ${selected ? 'selected' : ''}`}
                   onPointerDown={(ev) => onPointerDownZone(zone, ev)}
+                  onDoubleClick={(ev) => onDoubleClickZone(zone, ev)}
                 />
                 {hatch.map((l, i) => (
                   <line key={i} x1={l.x1} y1={toY(l.y1)} x2={l.x2} y2={toY(l.y2)} className="rack-hatch" />
                 ))}
                 {kind === 'rack' && <text x={cx} y={toY(cy) + 0.6} className="rack-label">Pipe Rack</text>}
                 {kind === 'road' && <text x={cx} y={toY(cy) + 0.6} className="zone-label">Road</text>}
+                {/* vertex handles (square corners) + edge midpoint handles
+                    (round) for the selected zone in Edit mode — drag a corner
+                    to reshape, drag an edge midpoint to expand/shrink that
+                    side. */}
+                {selected && tool === 'edit' && poly.map(([x, y], i) => (
+                  <rect
+                    key={`v${i}`}
+                    x={x - 0.8} y={toY(y) - 0.8} width={1.6} height={1.6}
+                    className="zone-vert"
+                    onPointerDown={(ev) => onPointerDownVert(zone, i, ev)}
+                  />
+                ))}
+                {selected && tool === 'edit' && poly.map(([x, y], i) => {
+                  const next = poly[(i + 1) % poly.length]
+                  const mx = (x + next[0]) / 2
+                  const my = (y + next[1]) / 2
+                  // pick the resize cursor by the edge's dominant axis: an
+                  // edge running along x resizes vertically (ns-resize), one
+                  // running along y resizes horizontally (ew-resize).
+                  const vertical = Math.abs(next[1] - y) > Math.abs(next[0] - x)
+                  return (
+                    <circle
+                      key={`e${i}`} r={1.0}
+                      cx={mx} cy={toY(my)}
+                      className={`zone-edge ${vertical ? 'ew' : 'ns'}`}
+                      onPointerDown={(ev) => onPointerDownEdge(zone, i, ev)}
+                    />
+                  )
+                })}
               </g>
             )
           })}
@@ -495,6 +699,14 @@ export default function PlotCanvas({
             )
           })()}
 
+          {zoneDim && (
+            <g className="zone-dim">
+              <text x={zoneDim.cx} y={toY(zoneDim.cy) - 1.4} className="zone-dim-label">
+                {fmtM(zoneDim.w)} × {fmtM(zoneDim.h)} m
+              </text>
+            </g>
+          )}
+
           {drawRect && drawKind && drawStart.current && (() => {
             const a = [drawRect.x1, drawRect.y1]
             const b = [drawRect.x2, drawRect.y2]
@@ -528,11 +740,13 @@ export default function PlotCanvas({
         >
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>{drawKind === 'rack' ? 'Draw Pipe Rack' : 'Draw Road'}</DialogTitle>
+              <DialogTitle>Draw {drawDef ? drawDef.label : 'Zone'}</DialogTitle>
             </DialogHeader>
             <div className="flex items-center gap-2">
               <Label htmlFor="draw-width" className="text-sm">
-                {drawKind === 'rack' ? 'Rack width (m)' : 'Road width (m)'}
+                {drawKind === 'rack' ? 'Rack width (m)'
+                  : drawKind === 'road' ? 'Road width (m)'
+                  : 'Zone width (m)'}
               </Label>
               <Input
                 id="draw-width" type="number" min="0.1" step="0.5"
@@ -550,8 +764,100 @@ export default function PlotCanvas({
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        <ZoneEditDialog
+          open={editOpen}
+          zone={selectedZone}
+          keepouts={keepouts}
+          onOpenChange={setEditOpen}
+          onRename={onEditZone}
+          onDelete={(name) => { onDeleteZone(name); setSelectedZone(null); setEditOpen(false) }}
+        />
       </div>
     </div>
+  )
+}
+
+// Edit dialog for a selected zone: rename it and/or change its role. The
+// zone's NAME is what drives its role in the backend (RACK*/ROAD*/MAINT*
+// prefixes decide the DXF layer + whether it's a pipe rack spine), so
+// changing the role just rewrites the name prefix; renaming to a free-text
+// "Other" name makes it a generic keep-out (like the sample UNDERGROUND zone).
+function ZoneEditDialog({ open, zone, keepouts, onOpenChange, onRename, onDelete }) {
+  const [name, setName] = useState('')
+  const [role, setRole] = useState('')
+
+  useEffect(() => {
+    if (!open || !zone) return
+    setName(zone)
+    const upper = zone.toUpperCase()
+    const r = upper.startsWith('RACK') ? 'rack'
+      : upper.startsWith('ROAD') ? 'road'
+      : upper.startsWith('MAINT') ? 'maint'
+      : upper.startsWith('UNDERGROUND') ? 'underground'
+      : 'other'
+    setRole(r)
+  }, [open, zone])
+
+  if (!zone) return null
+  const poly = keepouts[zone] ?? []
+
+  function apply() {
+    const next = name.trim()
+    if (!next || next === zone) { onOpenChange(false); return }
+    onRename(zone, poly, next)
+    setSelectedZone(next)
+    onOpenChange(false)
+  }
+
+  function changeRole(r) {
+    setRole(r)
+    if (r === 'other') { setName('KEEPOUT_1'); return }
+    const prefix = DRAW_KINDS[r].prefix
+    const n = (zone.match(/(\d+)$/) ? zone.match(/(\d+)$/)[1] : '1')
+    setName(`${prefix}_${n}`)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit zone</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1">
+            <Label className="text-sm">Type / role</Label>
+            <Select value={role} onValueChange={changeRole}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="road">Road</SelectItem>
+                <SelectItem value="rack">Pipe Rack</SelectItem>
+                <SelectItem value="maint">Maintenance</SelectItem>
+                <SelectItem value="underground">Underground</SelectItem>
+                <SelectItem value="other">Other (keep-out)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="zone-name" className="text-sm">Name</Label>
+            <Input
+              id="zone-name" value={name} autoFocus
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') apply() }}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {poly.length} vert{poly.length === 1 ? '' : 's'}. Drag a vertex on the
+            canvas to reshape; the name prefix decides the role/layer.
+          </p>
+        </div>
+        <DialogFooter className="gap-2">
+          <Button variant="destructive" onClick={() => onDelete(zone)}>Delete</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={apply}>Apply</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

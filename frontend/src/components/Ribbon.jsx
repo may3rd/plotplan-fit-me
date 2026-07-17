@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Loader2, Magnet,
-  MousePointer2, Play, Rows3, Route, Ruler, Save, Search,
+  MousePointer2, Pencil, Play, Rows3, Route, Ruler, Save, Search, Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -132,6 +132,7 @@ export default function Ribbon(props) {
     units, unitName, setUnitName, seedsInput, setSeedsInput, solve, solving, results,
     showGrid, setShowGrid, showRuler, setShowRuler, gridStep, setGridStep, snap, setSnap,
     tool, setTool, bumpDrawPrompt, fit, zoomPct, setZoomPercent,
+    bumpEditPrompt, selectedZone, deleteZone,
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
   } = props
 
@@ -231,6 +232,7 @@ export default function Ribbon(props) {
             >
               <ToggleGroupItem value="select" title="Select / Move"><MousePointer2 /></ToggleGroupItem>
               <ToggleGroupItem value="pan" title="Pan"><Hand /></ToggleGroupItem>
+              <ToggleGroupItem value="edit" title="Edit — drag roads, pipe racks, and other zones to move them"><Pencil /></ToggleGroupItem>
             </ToggleGroup>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
@@ -257,7 +259,7 @@ export default function Ribbon(props) {
         </TabsContent>
 
         <TabsContent value="insert" className="ribbon-body">
-          <Group label="Draw">
+          <Group label="Draw zone">
             <Button
               variant={tool === 'draw-road' ? 'default' : 'outline'} size="icon"
               onClick={() => { setTool('draw-road'); bumpDrawPrompt() }} title="Draw road"
@@ -269,6 +271,41 @@ export default function Ribbon(props) {
               onClick={() => { setTool('draw-rack'); bumpDrawPrompt() }} title="Draw pipe rack"
             >
               <Rows3 />
+            </Button>
+            <Button
+              variant={tool === 'draw-maint' ? 'default' : 'outline'} size="icon"
+              onClick={() => { setTool('draw-maint'); bumpDrawPrompt() }} title="Draw maintenance corridor"
+            >
+              <Route />
+            </Button>
+            <Button
+              variant={tool === 'draw-underground' ? 'default' : 'outline'} size="icon"
+              onClick={() => { setTool('draw-underground'); bumpDrawPrompt() }} title="Draw underground keep-out"
+            >
+              <Route />
+            </Button>
+            <Button
+              variant={tool === 'draw-keepout' ? 'default' : 'outline'} size="icon"
+              onClick={() => { setTool('draw-keepout'); bumpDrawPrompt() }} title="Draw keep-out zone"
+            >
+              <Route />
+            </Button>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
+          <Group label="Selected zone">
+            <Button
+              variant="outline" size="icon"
+              disabled={!selectedZone}
+              onClick={() => bumpEditPrompt()} title="Edit selected zone"
+            >
+              <Pencil />
+            </Button>
+            <Button
+              variant="outline" size="icon"
+              disabled={!selectedZone}
+              onClick={() => deleteZone(selectedZone)} title="Delete selected zone"
+            >
+              <Trash2 />
             </Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
