@@ -1,38 +1,175 @@
-.app {
-  display: flex;
-  flex-direction: column;
+/* ---- app shell: ribbon / canvas / status bar (Office-style) ------------- */
+
+.app-shell {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
   height: 100vh;
-  font-family: system-ui, sans-serif;
+  overflow: hidden;
 }
 
-.toolbar {
+.canvas-area {
+  min-height: 0; /* let the grid row actually constrain the canvas */
+  background: #eceef1;
+}
+
+/* ---- ribbon + menu bar -------------------------------------------------- */
+
+.ribbon-shell {
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+}
+
+.menubar-row {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.5rem 1rem;
-  border-bottom: 1px solid #ddd;
+  gap: 0.5rem;
+  padding: 0 0.75rem;
+  height: 2.25rem;
+  border-bottom: 1px solid var(--border);
 }
 
-.score {
+.app-name {
+  font-size: 0.8125rem;
   font-weight: 600;
-  margin-left: auto;
 }
 
-.score.infeasible {
-  color: #c0392b;
+.ribbon-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  min-height: 5.25rem;
 }
+
+.ribbon-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.375rem;
+}
+
+.ribbon-group-body {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.ribbon-group-label {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted-foreground);
+}
+
+/* ---- ruler + canvas grid ------------------------------------------------ */
+
+.canvas-grid {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  grid-template-rows: 26px 1fr;
+  height: 100%;
+}
+
+.canvas-grid[data-ruler='off'] {
+  grid-template-columns: 0 1fr;
+  grid-template-rows: 0 1fr;
+}
+
+.canvas-grid[data-ruler='off'] .ruler,
+.canvas-grid[data-ruler='off'] .ruler-corner {
+  display: none;
+}
+
+.ruler-corner {
+  grid-column: 1;
+  grid-row: 1;
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.ruler {
+  background: var(--card);
+  overflow: hidden;
+}
+
+.ruler-x {
+  grid-column: 2;
+  grid-row: 1;
+  border-bottom: 1px solid var(--border);
+}
+
+.ruler-y {
+  grid-column: 1;
+  grid-row: 2;
+  border-right: 1px solid var(--border);
+}
+
+.ruler line {
+  stroke: var(--muted-foreground);
+  stroke-width: 1;
+}
+
+.ruler text {
+  font-size: 9px;
+  fill: var(--muted-foreground);
+}
+
+.canvas-wrap {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---- status bar --------------------------------------------------------- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  height: 1.75rem;
+  padding: 0 0.75rem;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  background: var(--card);
+  border-top: 1px solid var(--border);
+}
+
+.status-sep {
+  width: 1px;
+  height: 0.9rem;
+  background: var(--border);
+}
+
+/* ---- the SVG plot itself ------------------------------------------------ */
 
 .plot {
-  flex: 1;
+  display: block;
   width: 100%;
+  height: 100%;
   background: #f7f7f5;
   touch-action: none;
+  user-select: none;
+}
+
+.plot[data-tool='pan'] {
+  cursor: grab;
+}
+
+.grid line {
+  stroke: #dfe2e7;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 
 .site {
   fill: none;
   stroke: #333;
-  stroke-width: 0.3;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
 }
 
 .rack {
@@ -42,7 +179,8 @@
 
 .zone {
   fill-opacity: 0.25;
-  stroke-width: 0.2;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 
 .zone.keepout {
@@ -62,18 +200,20 @@
 
 .conn {
   stroke: #999;
-  stroke-width: 0.15;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 
 .equip {
   stroke: #222;
-  stroke-width: 0.2;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
   cursor: grab;
 }
 
 .equip.pinned {
   cursor: not-allowed;
-  stroke-dasharray: 0.6 0.4;
+  stroke-dasharray: 3 2;
 }
 
 .tag {
@@ -81,9 +221,4 @@
   text-anchor: middle;
   fill: #222;
   pointer-events: none;
-}
-
-.panel {
-  padding: 2rem;
-  font-family: system-ui, sans-serif;
 }

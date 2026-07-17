@@ -1,20 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Loader2 } from 'lucide-react'
+import PlotCanvas from '@/components/PlotCanvas'
+import Ribbon from '@/components/Ribbon'
+import StatusBar from '@/components/StatusBar'
+import { fitView, zoomAt, zoomPercent } from '@/lib/view'
 import './App.css'
-
-const CLASS_COLOR = {
-  fired_heater: '#e05a47',
-  column: '#4a7fd6',
-  vessel: '#3fa66b',
-  exchanger: '#c98a2b',
-  pump_hc: '#8a5fd6',
-}
-
-function svgPoint(svg, clientX, clientY) {
-  const pt = svg.createSVGPoint()
-  pt.x = clientX
-  pt.y = clientY
-  return pt.matrixTransform(svg.getScreenCTM().inverse())
-}
 
 function App() {
   const [units, setUnits] = useState([])
@@ -24,8 +14,17 @@ function App() {
   const [score, setScore] = useState(null) // {feasible, cost}
   const [seedsInput, setSeedsInput] = useState('0:8')
   const [solving, setSolving] = useState(false)
-  const svgRef = useRef(null)
-  const dragTag = useRef(null)
+
+  // view / canvas state
+  const [view, setView] = useState(null) // SVG viewBox {x,y,w,h}, null until fitted
+  const [csize, setCsize] = useState(null) // canvas px size {width,height}
+  const [cursor, setCursor] = useState(null) // world {x,y} under pointer
+  const [showGrid, setShowGrid] = useState(true)
+  const [showRuler, setShowRuler] = useState(true)
+  const [tool, setTool] = useState('select')
+  const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
+  const fittedFor = useRef(null)
+
   const reqId = useRef(0)
 
   useEffect(() => {
@@ -46,6 +45,18 @@ function App() {
     })
   }, [unitName])
 
+  // fit once per loaded unit; on later resizes just re-fit aspect via a full
+  // fitView (cheap, and re-fitting on resize is the least-surprising default).
+  useEffect(() => {
+    if (!data || !csize?.width) return
+    if (fittedFor.current !== data) {
+      const fv = fitView(data.site, csize)
+      setView(fv)
+      fitW.current = fv.w
+      fittedFor.current = data
+    }
+  }, [data, csize])
+
   const scoreLayout = useCallback((pos) => {
     if (!unitName) return
     const id = ++reqId.current
@@ -56,9 +67,7 @@ function App() {
       body: JSON.stringify({ equipment }),
     })
       .then((r) => r.json())
-      .then((s) => {
-        if (id === reqId.current) setScore(s)
-      })
+      .then((s) => { if (id === reqId.current) setScore(s) })
   }, [unitName])
 
   useEffect(() => {
@@ -66,31 +75,22 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data])
 
-  if (!data) return <div className="panel">Loading…</div>
-
-  const { equipment, connections, site, keepouts } = data
-  const toY = (y) => site.d - y // north-up: flip y for SVG
-  const byTag = Object.fromEntries(equipment.map((e) => [e.tag, e]))
-
-  function onPointerDown(tag, ev) {
-    const eq = byTag[tag]
-    if (eq.pinned) return
-    ev.currentTarget.setPointerCapture(ev.pointerId)
-    dragTag.current = tag
-  }
-
-  function onPointerMove(ev) {
-    const tag = dragTag.current
-    if (!tag) return
-    const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
-    const next = { ...positions, [tag]: { x: p.x, y: site.d - p.y } }
+  const onPositions = useCallback((next) => {
     setPositions(next)
     scoreLayout(next)
-  }
+  }, [scoreLayout])
 
-  function onPointerUp() {
-    dragTag.current = null
-  }
+  const zoomCenter = useCallback((factor) => {
+    if (!csize?.width) return
+    setView((v) => zoomAt(v, csize, csize.width / 2, csize.height / 2, factor))
+  }, [csize])
+
+  const fit = useCallback(() => {
+    if (!data || !csize?.width) return
+    const fv = fitView(data.site, csize)
+    setView(fv)
+    fitW.current = fv.w
+  }, [data, csize])
 
   async function solve() {
     setSolving(true)
@@ -116,86 +116,40 @@ function App() {
     }
   }
 
+  if (!data) {
+    return (
+      <div className="flex h-screen items-center justify-center text-muted-foreground">
+        <Loader2 className="mr-2 size-4 animate-spin" /> Loading…
+      </div>
+    )
+  }
+
   return (
-    <div className="app">
-      <header className="toolbar">
-        <label>
-          Unit:{' '}
-          <select value={unitName ?? ''} onChange={(e) => setUnitName(e.target.value)}>
-            {units.map((u) => (
-              <option key={u} value={u}>{u}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Seeds:{' '}
-          <input value={seedsInput} onChange={(e) => setSeedsInput(e.target.value)} size={8} />
-        </label>
-        <button onClick={solve} disabled={solving}>{solving ? 'Solving…' : 'Solve'}</button>
-        <span className={`score ${score?.feasible === false ? 'infeasible' : ''}`}>
-          {score == null
-            ? ''
-            : score.feasible
-              ? `score: ${score.cost.toFixed(0)}`
-              : 'infeasible layout'}
-        </span>
-      </header>
+    <div className="app-shell">
+      <Ribbon
+        units={units} unitName={unitName} setUnitName={setUnitName}
+        seedsInput={seedsInput} setSeedsInput={setSeedsInput}
+        solve={solve} solving={solving} score={score}
+        showGrid={showGrid} setShowGrid={setShowGrid}
+        showRuler={showRuler} setShowRuler={setShowRuler}
+        tool={tool} setTool={setTool}
+        zoomIn={() => zoomCenter(0.8)} zoomOut={() => zoomCenter(1.25)} fit={fit}
+      />
 
-      <svg
-        ref={svgRef}
-        className="plot"
-        viewBox={`0 0 ${site.w} ${site.d}`}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-      >
-        <rect x={0} y={0} width={site.w} height={site.d} className="site" />
+      <main className="canvas-area">
+        <PlotCanvas
+          data={data} positions={positions} onPositions={onPositions}
+          view={view} setView={setView}
+          showGrid={showGrid} showRuler={showRuler} tool={tool}
+          onCursor={setCursor} onSize={setCsize}
+        />
+      </main>
 
-        {site.racks.map(([ry, rhalf], i) => (
-          <rect
-            key={i}
-            x={0}
-            y={toY(ry + rhalf)}
-            width={site.w}
-            height={rhalf * 2}
-            className="rack"
-          />
-        ))}
-
-        {Object.entries(keepouts ?? {}).map(([zone, poly]) => (
-          <polygon
-            key={zone}
-            points={poly.map(([x, y]) => `${x},${toY(y)}`).join(' ')}
-            className={`zone ${zone.toUpperCase().startsWith('ROAD') ? 'road' : zone.toUpperCase().startsWith('MAINT') ? 'maint' : 'keepout'}`}
-          />
-        ))}
-
-        {connections.map((c, i) => {
-          const a = positions[c.a]
-          const b = positions[c.b]
-          if (!a || !b) return null
-          return (
-            <line key={i} x1={a.x} y1={toY(a.y)} x2={b.x} y2={toY(b.y)} className="conn" />
-          )
-        })}
-
-        {equipment.map((e) => {
-          const p = positions[e.tag] ?? { x: e.x, y: e.y }
-          return (
-            <g key={e.tag}>
-              <rect
-                x={p.x - e.w / 2}
-                y={toY(p.y) - e.d / 2}
-                width={e.w}
-                height={e.d}
-                fill={CLASS_COLOR[e.cls] ?? '#888'}
-                className={`equip ${e.pinned ? 'pinned' : ''}`}
-                onPointerDown={(ev) => onPointerDown(e.tag, ev)}
-              />
-              <text x={p.x} y={toY(p.y) - e.d / 2 - 0.6} className="tag">{e.tag}</text>
-            </g>
-          )
-        })}
-      </svg>
+      <StatusBar
+        unitName={unitName} score={score} cursor={cursor}
+        zoomPct={view ? zoomPercent(view, fitW.current) : 100}
+        tool={tool}
+      />
     </div>
   )
 }
