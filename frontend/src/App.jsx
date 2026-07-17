@@ -3,17 +3,21 @@ import { Loader2 } from 'lucide-react'
 import PlotCanvas from '@/components/PlotCanvas'
 import Ribbon from '@/components/Ribbon'
 import StatusBar from '@/components/StatusBar'
+import { buildCaseData, BLANK_PROJECT, parseProjectFile, projectFileContents } from '@/lib/project'
+import { downloadRaster } from '@/lib/raster'
 import { fitView, zoomAt, zoomPercent } from '@/lib/view'
 import './App.css'
 
 function App() {
   const [units, setUnits] = useState([])
   const [unitName, setUnitName] = useState(null)
-  const [data, setData] = useState(null) // {equipment, connections, site, keepouts}
+  const [data, setData] = useState(null) // {name, equipment, connections, site, keepouts, spacing, wind_clearance_m}
   const [positions, setPositions] = useState({}) // tag -> {x, y}
+  const [fileName, setFileName] = useState(null) // last-used Save/Open filename, or null (unsaved)
   const [score, setScore] = useState(null) // {feasible, cost}
   const [seedsInput, setSeedsInput] = useState('0:8')
   const [solving, setSolving] = useState(false)
+  const [results, setResults] = useState(null) // [{seed, cost}, ...] from the last solve
 
   // view / canvas state
   const [view, setView] = useState(null) // SVG viewBox {x,y,w,h}, null until fitted
@@ -21,11 +25,25 @@ function App() {
   const [cursor, setCursor] = useState(null) // world {x,y} under pointer
   const [showGrid, setShowGrid] = useState(true)
   const [showRuler, setShowRuler] = useState(true)
+  const [gridStep, setGridStep] = useState(null) // meters/tick override; null = auto
+  const [snap, setSnap] = useState(false)
   const [tool, setTool] = useState('select')
   const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
   const fittedFor = useRef(null)
 
   const reqId = useRef(0)
+
+  // shared by the unit-picker load, File > New, and File > Open — swaps in
+  // a whole new project (data + positions rebuilt from its equipment) and
+  // clears anything that belonged to the previous one.
+  const applyProject = useCallback((d) => {
+    setData(d)
+    const pos = {}
+    for (const e of d.equipment) pos[e.tag] = { x: e.x, y: e.y }
+    setPositions(pos)
+    setScore(null)
+    setResults(null)
+  }, [])
 
   useEffect(() => {
     fetch('/api/units').then((r) => r.json()).then((names) => {
@@ -37,12 +55,10 @@ function App() {
   useEffect(() => {
     if (!unitName) return
     fetch(`/api/units/${unitName}`).then((r) => r.json()).then((d) => {
-      setData(d)
-      const pos = {}
-      for (const e of d.equipment) pos[e.tag] = { x: e.x, y: e.y }
-      setPositions(pos)
-      setScore(null)
+      applyProject(d)
+      setFileName(null) // loading a case study from the dropdown isn't "opening a file"
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unitName])
 
   // fit once per loaded unit; on later resizes just re-fit aspect via a full
@@ -58,17 +74,16 @@ function App() {
   }, [data, csize])
 
   const scoreLayout = useCallback((pos) => {
-    if (!unitName) return
+    if (!data) return
     const id = ++reqId.current
-    const equipment = Object.entries(pos).map(([tag, p]) => ({ tag, x: p.x, y: p.y }))
-    fetch(`/api/units/${unitName}/score`, {
+    fetch('/api/score', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ equipment }),
+      body: JSON.stringify({ data: buildCaseData(data, pos) }),
     })
       .then((r) => r.json())
       .then((s) => { if (id === reqId.current) setScore(s) })
-  }, [unitName])
+  }, [data])
 
   useEffect(() => {
     if (data && Object.keys(positions).length) scoreLayout(positions)
@@ -84,6 +99,12 @@ function App() {
     if (!csize?.width) return
     setView((v) => zoomAt(v, csize, csize.width / 2, csize.height / 2, factor))
   }, [csize])
+
+  const setZoomPercent = useCallback((pct) => {
+    if (!csize?.width || !view) return
+    const targetW = fitW.current / (pct / 100)
+    zoomCenter(targetW / view.w)
+  }, [csize, view, zoomCenter])
 
   const fit = useCallback(() => {
     if (!data || !csize?.width) return
@@ -101,19 +122,93 @@ function App() {
             return Array.from({ length: b - a }, (_, i) => a + i)
           })()
         : [Number(seedsInput)]
-      const r = await fetch(`/api/units/${unitName}/solve`, {
+      const r = await fetch('/api/solve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seeds }),
+        body: JSON.stringify({ data: buildCaseData(data, positions), seeds }),
       })
       const result = await r.json()
       const pos = {}
       for (const e of result.equipment) pos[e.tag] = { x: e.x, y: e.y }
       setPositions(pos)
       setScore({ feasible: true, cost: result.cost })
+      setResults(result.results)
     } finally {
       setSolving(false)
     }
+  }
+
+  async function downloadResponse(url, fallbackName) {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: buildCaseData(data, positions) }),
+    })
+    const blob = await r.blob()
+    const match = /filename="([^"]+)"/.exec(r.headers.get('Content-Disposition') ?? '')
+    const filename = match ? match[1] : fallbackName
+    const dlUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = dlUrl
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(dlUrl)
+  }
+
+  const projectName = () => data.name || 'layout'
+  const exportDxf = () => downloadResponse('/api/export/dxf', `${projectName()}.dxf`)
+  const exportTakeoff = () => downloadResponse('/api/export/takeoff', `${projectName()}_takeoff.csv`)
+
+  // svg.plot is unique in the whole app — simpler than threading a ref down
+  // through PlotCanvas just for this.
+  const exportRaster = (kind) => {
+    const svgEl = document.querySelector('svg.plot')
+    if (svgEl) downloadRaster(svgEl, kind, `${projectName()}.${kind}`)
+  }
+
+  function downloadText(text, filename) {
+    const blob = new Blob([text], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function newProject() {
+    applyProject({ ...BLANK_PROJECT, equipment: [], connections: [], keepouts: {}, spacing: [] })
+    setUnitName(null)
+    setFileName(null)
+  }
+
+  function openProject(file) {
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = parseProjectFile(reader.result)
+        applyProject(parsed)
+        setUnitName(null)
+        setFileName(file.name)
+      } catch (err) {
+        window.alert(`Couldn't open "${file.name}": ${err.message}`)
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  function saveProject() {
+    if (fileName) downloadText(projectFileContents(data, positions), fileName)
+    else saveProjectAs()
+  }
+
+  function saveProjectAs() {
+    const suggested = fileName ?? `${data.name || 'layout'}.json`
+    const name = window.prompt('Save project as:', suggested)
+    if (!name) return
+    const finalName = name.endsWith('.json') ? name : `${name}.json`
+    downloadText(projectFileContents(data, positions), finalName)
+    setFileName(finalName)
   }
 
   if (!data) {
@@ -129,24 +224,30 @@ function App() {
       <Ribbon
         units={units} unitName={unitName} setUnitName={setUnitName}
         seedsInput={seedsInput} setSeedsInput={setSeedsInput}
-        solve={solve} solving={solving} score={score}
+        solve={solve} solving={solving} results={results}
         showGrid={showGrid} setShowGrid={setShowGrid}
         showRuler={showRuler} setShowRuler={setShowRuler}
+        gridStep={gridStep} setGridStep={setGridStep}
+        snap={snap} setSnap={setSnap}
         tool={tool} setTool={setTool}
         zoomIn={() => zoomCenter(0.8)} zoomOut={() => zoomCenter(1.25)} fit={fit}
+        zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
+        newProject={newProject} openProject={openProject}
+        saveProject={saveProject} saveProjectAs={saveProjectAs}
+        exportDxf={exportDxf} exportTakeoff={exportTakeoff} exportRaster={exportRaster}
       />
 
       <main className="canvas-area">
         <PlotCanvas
           data={data} positions={positions} onPositions={onPositions}
           view={view} setView={setView}
-          showGrid={showGrid} showRuler={showRuler} tool={tool}
+          showGrid={showGrid} showRuler={showRuler} gridStep={gridStep} snap={snap} tool={tool}
           onCursor={setCursor} onSize={setCsize}
         />
       </main>
 
       <StatusBar
-        unitName={unitName} score={score} cursor={cursor}
+        projectLabel={fileName ?? data.name ?? 'untitled'} score={score} cursor={cursor}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100}
         tool={tool}
       />

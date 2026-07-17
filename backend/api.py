@@ -1,17 +1,37 @@
-"""FastAPI backend wrapping the plotplan solver — read units, solve them,
-and score a live (possibly user-dragged) layout. Stateless: a "unit" is
-always read fresh from its data/<name>/ CSV folder, no database.
+"""FastAPI backend wrapping the plotplan solver.
+
+GET /api/units[/{name}] read a starting case study from data/<name>/ CSVs —
+that's the only thing tied to on-disk units. Everything that scores, solves,
+or exports a layout (POST /api/score, /api/solve, /api/export/*) takes the
+FULL case study inline in the request body instead of a unit name, so a
+project loaded from (or never backed by) a CSV folder — e.g. a saved/opened
+.json project file in the frontend — can be scored/solved/exported exactly
+the same way. Still stateless: nothing is written to disk except the
+temp file each export briefly uses to reuse write_dxf()/write_takeoff().
 
 Run: uvicorn api:app --reload --port 8000
 """
 import os
+import tempfile
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from plotplan import feasible, load_unit, piping_cost, solve_ranked
+from plotplan import (
+    CPSAT_THRESHOLD,
+    Equipment,
+    Site,
+    WIND_CLEARANCE_M,
+    feasible,
+    load_unit,
+    piping_cost,
+    solve,
+    solve_cpsat,
+    write_dxf,
+    write_takeoff,
+)
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
@@ -38,48 +58,148 @@ def list_units():
 def get_unit(name: str):
     eq, conns, spacing, site, keepouts = load_unit(_unit_dir(name))
     return {
+        "name": name,
         "equipment": [asdict(e) for e in eq],
         "connections": [{"a": a, "b": b, "weight": w} for a, b, w in conns],
         "site": asdict(site),
         "keepouts": keepouts,
+        "spacing": [{"a": a, "b": b, "gap": g} for (a, b), g in spacing.items()],
+        "wind_clearance_m": WIND_CLEARANCE_M,
     }
 
 
-class SolveRequest(BaseModel):
-    seeds: list[int] = [0]
+# ------------------------------------------------------- inline case data
 
-
-@app.post("/api/units/{name}/solve")
-def solve_unit(name: str, req: SolveRequest):
-    results, best = solve_ranked(_unit_dir(name), req.seeds)
-    cost, eq, conns, site, keepouts = best
-    return {
-        "results": [{"seed": s, "cost": c} for s, c in results],
-        "cost": cost,
-        "equipment": [asdict(e) for e in eq],
-    }
-
-
-class LayoutEquipment(BaseModel):
+class EquipmentIn(BaseModel):
     tag: str
-    x: float
-    y: float
+    cls: str
+    w: float
+    d: float
+    x: float = 0.0
+    y: float = 0.0
+    pinned: bool = False
+    pull_side: str = ""
+    pull_len: float = 0.0
+
+
+class ConnectionIn(BaseModel):
+    a: str
+    b: str
+    weight: float
+
+
+class SpacingEntryIn(BaseModel):
+    a: str
+    b: str
+    gap: float
+
+
+class SiteIn(BaseModel):
+    w: float
+    d: float
+    racks: list[list[float]] = []  # [[rack_y, rack_half], ...]
+    wind_dir: str = ""
+
+
+class CaseData(BaseModel):
+    """The full self-contained shape of a project — same fields GET
+    /api/units/{name} returns, minus wind_clearance_m (that's a fixed
+    backend constant, not per-project data)."""
+    name: str = "layout"
+    equipment: list[EquipmentIn]
+    connections: list[ConnectionIn] = []
+    site: SiteIn
+    keepouts: dict[str, list[list[float]]] = {}
+    spacing: list[SpacingEntryIn] = []
+
+
+def _build_case(data: CaseData):
+    """CaseData -> the (eq, conns, spacing, site, keepouts) tuple every
+    plotplan.py function expects. Kept fresh per call (never reused across
+    solve() seeds) since solve()/solve_cpsat() mutate Equipment in place —
+    same reload-per-seed rule load_unit()-based code follows."""
+    eq = [Equipment(**e.dict()) for e in data.equipment]
+    conns = [(c.a, c.b, c.weight) for c in data.connections]
+    spacing = {(s.a, s.b): s.gap for s in data.spacing}
+    site = Site(data.site.w, data.site.d, [(r[0], r[1]) for r in data.site.racks], data.site.wind_dir)
+    keepouts = {zone: [(p[0], p[1]) for p in poly] for zone, poly in data.keepouts.items()}
+    return eq, conns, spacing, site, keepouts
 
 
 class ScoreRequest(BaseModel):
-    equipment: list[LayoutEquipment]
+    data: CaseData
 
 
-@app.post("/api/units/{name}/score")
-def score_unit(name: str, req: ScoreRequest):
-    """Score a caller-supplied layout (e.g. after dragging an item in the
-    UI) against the unit's own equipment/spacing/keepouts — everything
-    except position comes from the CSVs, only x/y are overridden."""
-    eq, conns, spacing, site, keepouts = load_unit(_unit_dir(name))
-    by_tag = {e.tag: e for e in eq}
-    for item in req.equipment:
-        if item.tag not in by_tag:
-            raise HTTPException(400, f"unknown equipment tag: {item.tag}")
-        by_tag[item.tag].x, by_tag[item.tag].y = item.x, item.y
+@app.post("/api/score")
+def score_data(req: ScoreRequest):
+    """Score a layout (e.g. after dragging an item in the UI) — positions
+    already live in req.data.equipment, nothing is overlaid."""
+    eq, conns, spacing, site, keepouts = _build_case(req.data)
     ok = feasible(eq, site, spacing, keepouts)
     return {"feasible": ok, "cost": piping_cost(eq, conns, site) if ok else None}
+
+
+class SolveRequest(BaseModel):
+    data: CaseData
+    seeds: list[int] = [0]
+
+
+@app.post("/api/solve")
+def solve_data(req: SolveRequest):
+    """Same ranking loop as plotplan.solve_ranked(), but building each
+    seed's Equipment list fresh from the posted CaseData instead of
+    reloading CSVs from disk."""
+    results = []
+    best = None  # (cost, eq)
+    for seed in req.seeds:
+        eq, conns, spacing, site, keepouts = _build_case(req.data)
+        movable = sum(1 for e in eq if not e.pinned)
+        if movable > CPSAT_THRESHOLD:
+            cost = solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed)
+        else:
+            cost = solve(eq, conns, site, spacing, keepouts, seed=seed)
+        results.append((seed, cost))
+        if best is None or cost < best[0]:
+            best = (cost, eq)
+    results.sort(key=lambda r: r[1])
+    return {
+        "results": [{"seed": s, "cost": c} for s, c in results],
+        "cost": best[0],
+        "equipment": [asdict(e) for e in best[1]],
+    }
+
+
+@app.post("/api/export/dxf")
+def export_dxf(req: ScoreRequest):
+    eq, conns, spacing, site, keepouts = _build_case(req.data)
+    fd, path = tempfile.mkstemp(suffix=".dxf")
+    os.close(fd)
+    try:
+        write_dxf(path, eq, site, keepouts)
+        with open(path, "rb") as f:
+            content = f.read()
+    finally:
+        os.unlink(path)
+    return Response(
+        content=content,
+        media_type="application/dxf",
+        headers={"Content-Disposition": f'attachment; filename="{req.data.name}.dxf"'},
+    )
+
+
+@app.post("/api/export/takeoff")
+def export_takeoff(req: ScoreRequest):
+    eq, conns, spacing, site, keepouts = _build_case(req.data)
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    os.close(fd)
+    try:
+        write_takeoff(path, eq, conns, site)
+        with open(path, "rb") as f:
+            content = f.read()
+    finally:
+        os.unlink(path)
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{req.data.name}_takeoff.csv"'},
+    )

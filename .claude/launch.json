@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "backend",
-      "runtimeExecutable": "/Users/maetee/Documents/1. PROJECTS/claude-workspace/plotplan-fit-me/backend/.venv/bin/uvicorn",
-      "runtimeArgs": ["api:app", "--reload", "--port", "8000", "--app-dir", "/Users/maetee/Documents/1. PROJECTS/claude-workspace/plotplan-fit-me/backend"],
+      "runtimeExecutable": "/Users/maetee/Code/plotplan-fit-me/backend/.venv/bin/uvicorn",
+      "runtimeArgs": ["api:app", "--reload", "--port", "8000", "--app-dir", "/Users/maetee/Code/plotplan-fit-me/backend"],
       "port": 8000
     },
     {

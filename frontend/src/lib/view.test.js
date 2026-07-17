@@ -1,6 +1,8 @@
 // Runnable check for view.js. No framework: `node src/lib/view.test.js`.
 import assert from 'node:assert'
-import { fitView, reaspect, toWorld, zoomAt, panBy, zoomPercent, niceStep, MIN_W } from './view.js'
+import {
+  fitView, reaspect, toWorld, zoomAt, panBy, zoomPercent, niceStep, adaptiveStep, ticks, MIN_W,
+} from './view.js'
 
 const rect = { width: 800, height: 600 }
 const site = { w: 60, d: 80 }
@@ -48,5 +50,19 @@ assert.equal(niceStep(3), 5)
 assert.equal(niceStep(8), 10)
 assert.equal(niceStep(23), 50)
 assert.equal(niceStep(120), 200)
+
+// adaptiveStep keeps the major-tick count within [minTicks, maxTicks] by
+// doubling/halving the user's base step
+assert.equal(adaptiveStep(5, 40), 5) // 8 ticks, already in range
+assert.equal(adaptiveStep(5, 1000), 80) // would be 200 ticks -> doubles up to 80 (12.5 ticks)
+assert.equal(adaptiveStep(5, 8), 1.25) // would be 1.6 ticks -> halves twice to 1.25 (6.4 ticks)
+
+// ticks: major ticks land on multiples of step, minor ticks subdivide by 5
+// and never coincide with a major tick
+const t = ticks(0, 20, 20, 5) // gridStep=5 override, span=20 -> 4 ticks, stays at base
+assert.equal(t.step, 5)
+assert.deepEqual(t.out, [0, 5, 10, 15, 20])
+assert.equal(t.minorStep, 1)
+assert.deepEqual(t.minorOut, [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19])
 
 console.log('view.test.js OK')

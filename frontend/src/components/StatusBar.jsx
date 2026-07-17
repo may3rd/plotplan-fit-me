@@ -1,7 +1,7 @@
-export default function StatusBar({ unitName, score, cursor, zoomPct, tool }) {
+export default function StatusBar({ projectLabel, score, cursor, zoomPct, tool }) {
   return (
     <div className="statusbar">
-      <span>{unitName ?? '—'}</span>
+      <span>{projectLabel ?? '—'}</span>
       <span className="status-sep" />
       <span className={score && !score.feasible ? 'text-destructive' : ''}>
         {score == null

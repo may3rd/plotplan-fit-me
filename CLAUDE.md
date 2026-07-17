@@ -328,3 +328,30 @@ Format: `- [date] finding — why it matters`
   new one. `ortools` added to `backend/requirements.txt` — the one
   dependency addition this repo's ponytail rules explicitly anticipate,
   since the roadmap item itself names OR-Tools as the tool.
+- [2026-07-17] `backend/api.py`'s mutating endpoints changed shape, done at
+  explicit user request for File > New/Open/Save/Save As/Export in the
+  frontend (not a PLAN.md item). `POST /api/units/{name}/score|solve|
+  export/*` (position-overlay-onto-a-named-unit) were replaced outright by
+  `POST /api/score`, `/api/solve`, `/api/export/dxf`, `/api/export/takeoff`
+  — all take the FULL case study inline in the request body (a `CaseData`
+  pydantic model: equipment/connections/site/keepouts/spacing/name) instead
+  of a `{name}` path param + position overlay. `GET /api/units` and `GET
+  /api/units/{name}` are unchanged — still the only things that read
+  `data/<name>/` CSVs, now used only to seed a project's *starting* state.
+  Reasoning: a project opened from (or saved to) a `.json` file in the
+  frontend never has to correspond to an on-disk unit — `_build_case()`
+  converts posted JSON into the same `(eq, conns, spacing, site, keepouts)`
+  tuple `load_unit()` produces, then every existing function
+  (`feasible()`/`piping_cost()`/`solve()`/`solve_cpsat()`/`write_dxf()`/
+  `write_takeoff()`) is called exactly as before — no solver changes.
+  `/api/solve`'s per-seed loop rebuilds fresh `Equipment` objects from the
+  posted spec each iteration (not by reloading CSVs, since there's no file)
+  — same reload-per-seed rule as `solve_ranked()`, for the same mutation
+  reason. Frontend's `src/lib/project.js` mirrors this shape
+  (`buildCaseData()`/`projectFileContents()`/`parseProjectFile()`) with its
+  own runnable check; `src/lib/raster.js` (PNG/JPG export, client-side SVG
+  rasterization) has no check — it's inherently DOM/Canvas-dependent,
+  verified manually in-browser instead. If a mutating endpoint's request
+  shape needs to change again, grep `CaseData` and `_build_case` first —
+  same "grep before assuming" caution as every other shape change logged
+  above.

@@ -70,3 +70,32 @@ export function niceStep(raw) {
   const mult = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10
   return mult * pow
 }
+
+/** Scale a user-chosen base step (meters/tick) by powers of 2 so the major
+ * tick count across `span` stays within [minTicks, maxTicks] — the grid
+ * "keeps up" with zoom instead of a fixed step becoming too dense/sparse. */
+export function adaptiveStep(base, span, minTicks = 4, maxTicks = 20) {
+  let step = base
+  while (span / step > maxTicks) step *= 2
+  while (span / step < minTicks) step /= 2
+  return step
+}
+
+/** Major + minor tick positions (world units) inside [lo, hi]. `gridStep`
+ * (meters/tick) anchors the major step when given (a truthy positive
+ * number, scaled per `adaptiveStep`); otherwise it's an auto "nice" step
+ * from the visible span. Minor ticks subdivide each major step into 5,
+ * skipping any that land on a major tick. */
+export function ticks(lo, hi, span, gridStep) {
+  const step = gridStep > 0 ? adaptiveStep(gridStep, span) : niceStep(span / 10)
+  const out = []
+  for (let t = Math.ceil(lo / step) * step; t <= hi; t += step) out.push(Math.round(t / step) * step)
+  const minorStep = step / 5
+  const minorOut = []
+  for (let t = Math.ceil(lo / minorStep) * minorStep; t <= hi; t += minorStep) {
+    const r = Math.round(t / minorStep) * minorStep
+    const ratio = r / step
+    if (Math.abs(ratio - Math.round(ratio)) > 1e-6) minorOut.push(r)
+  }
+  return { step, out, minorStep, minorOut }
+}
