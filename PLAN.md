@@ -296,32 +296,53 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     log); toggling off fires zero `/relax` calls on a subsequent drag.
 17. `[x]` **Push-repair before relax** — new `push_repair(eq, site,
     spacing, keepouts, cap=50)` in `plotplan.py`: loop up to `cap` times,
-    find the worst (largest deficit) pairwise spacing violation with at
-    least one movable side, translate that side by `_push_vector()`'s
-    minimum single-axis translation (clamped to site bounds), repeat;
-    returns `True` once fully `feasible()`, `False` if the cap is hit
-    first. `api.py`'s `/api/relax` calls it when the freshly-pinned drag
-    position is infeasible, before the item-16 SA refine. Pure stdlib
-    geometry — reuses `edge_gap`/`min_gap`/`feasible`, not `_move_feasible`
+    find every pairwise spacing violation with at least one movable side,
+    worst first; for each, try both of `_axis_push_candidates()`'s
+    single-axis translations (clamped to site bounds) and keep whichever
+    leaves the *whole layout's* total deficit lower — falling through to
+    the next-worst violation if the top one's best candidate makes no
+    real progress — repeat; returns `True` once fully `feasible()`,
+    `False` if every violation is stuck or the cap is hit. `api.py`'s
+    `/api/relax` calls it when the freshly-pinned drag position is
+    infeasible, before the item-16 SA refine. Pure stdlib geometry —
+    reuses `edge_gap`/`min_gap`/`feasible`, not `_move_feasible`
     (considered it per the original plan text, but the loop's "are we
     done" question always has one unambiguous answer via a full
     `feasible()` scan at cheap item counts, so introducing an incremental
     per-move check would've added a real correctness trap — see
-    `push_repair`'s docstring — for no benefit at this scale). One real
-    bug caught and fixed during implementation: `_push_vector()`'s first
-    draft used the *needed excess* itself as the push distance, which
-    silently undershoots by exactly the overlap depth whenever two
-    footprints deeply overlap (the "dropped right on top of a neighbor"
-    case this exists for) — fixed to push to the *target absolute center
-    distance* (half-width-sum + needed excess) instead. Verified in
-    `test_relax.py`: a 3-item row (R-0/R-1/R-2) with a 4th item dropped
-    almost exactly onto R-1 (offset along the axis with open room, not
-    into R-0/R-2 — the greedy single-axis heuristic doesn't plan
-    multi-item cascades, so the test targets a scenario within its actual
-    capability, not an arbitrarily hard rearrangement) legalizes and
-    passes `_check()`; a drop exactly concentric with another item (no
-    push direction is mathematically defined) reports `{feasible: False}`
-    honestly rather than looping or raising.
+    `push_repair`'s docstring — for no benefit at this scale).
+    Two real bugs caught and fixed during implementation (both found by
+    testing against a genuinely common scenario — a never-solved unit,
+    where every unpinned equipment.csv row with blank x/y defaults to
+    exactly (0, 0), not a synthetic edge case): (1) `_push_vector()`'s
+    first draft used the *needed excess* itself as the push distance,
+    which silently undershoots by exactly the overlap depth whenever two
+    footprints deeply overlap — fixed to push to the *target absolute
+    center distance* (half-width-sum + needed excess) instead, and it
+    also refused to pick any direction at all for two exactly-concentric
+    items (5+ items literally stacked at the same point, as a fresh
+    project's default state is) — fixed by defaulting to +x/+y rather
+    than giving up, since a deterministic-but-arbitrary separating push is
+    still better than none. (2) The original "always take the single
+    cheapest-axis push" greedy design had a real local-minimum deadlock:
+    the worst violation's only escape route can itself be clamped right
+    back to where it started by a site/pinned-neighbor boundary (e.g. a
+    vessel wedged between a pinned heater and the site edge) — a
+    permanent no-op that got retried every remaining iteration while a
+    *separate* stuck cluster elsewhere never got a turn. Fixed by
+    evaluating both axis candidates against total layout deficit (not
+    just the one pair) and falling through to the next-worst violation
+    when the top one can't make progress, rather than fixating on it.
+    Net effect: successfully separates several items that default to the
+    exact same point (verified: 4 of 6 stacked items untangle cleanly
+    before the remainder hits a genuine N-way tangle needing coordinated
+    multi-item placement — beyond what a one-step-lookahead heuristic can
+    solve; that's `solve()`'s job, not a quick nudge repair's). Verified
+    in `test_relax.py`: a 3-item row with a 4th item dropped onto the
+    middle one legalizes; a drop exactly concentric with another item
+    (previously an unresolvable dead end) now also legalizes via the
+    arbitrary-direction default; a site genuinely too small to separate
+    two items on any axis still reports `{feasible: False}` honestly.
 18. `[x]` **Anytime progress streaming** — `solve()`'s `on_progress(fraction)`
     replaced outright with two independent, decoupled params: `on_improve
     (best_cost, positions, k)`, fired every time (unthrottled — a true

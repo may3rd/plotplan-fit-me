@@ -778,18 +778,23 @@ def solve_one(eq: list, conns: list, site: Site, spacing: dict = None, keepouts:
 
 # ------------------------------------------------- Mode 2 push-repair (item 17)
 
-def _push_vector(mover: Equipment, other: Equipment, min_gap_needed: float, eps: float = 1e-6):
-    """Minimum-magnitude single-axis translation for `mover`, directly away
-    from `other`, that clears min_gap_needed under edge_gap()'s "excess
-    beyond half-widths, combined via hypot" formula — picks whichever axis
-    (x or y) needs less added movement (the "axis of smallest overlap"
-    item 17 calls for) and returns (dx, dy) to add to mover.x/mover.y
-    (exactly one of the two is nonzero). None if mover and other are
-    exactly concentric — no push direction is defined, a dead end for this
-    heuristic (push_repair reports failure rather than guessing)."""
+def _axis_push_candidates(mover: Equipment, other: Equipment, min_gap_needed: float, eps: float = 1e-6):
+    """Both single-axis translations for `mover`, directly away from
+    `other`, that would each (on their own) clear min_gap_needed under
+    edge_gap()'s "excess beyond half-widths, combined via hypot" formula —
+    one holding y fixed (push along x), one holding x fixed (push along
+    y). Returns [(dx, 0.0), (0.0, dy)] to add to mover.x/mover.y — the
+    caller (push_repair) picks whichever actually leaves the layout better
+    off, since blindly taking the smaller of the two (an earlier version
+    of this function did) can shove `mover` straight into a THIRD item
+    when the "cheap" axis happens to already be occupied there.
+    If mover and other are exactly concentric (dx_c == dy_c == 0 — e.g.
+    every unpinned item in a never-solved unit defaults to (0, 0), so this
+    is the COMMON case on a fresh project, not a rare one), both signs
+    default to +1 by the `>= 0` tie-break below rather than refusing to
+    pick a direction — an arbitrary but deterministic and equally-valid
+    separating push."""
     dx_c, dy_c = mover.x - other.x, mover.y - other.y
-    if dx_c == 0.0 and dy_c == 0.0:
-        return None
     half_x, half_y = (mover.w + other.w) / 2, (mover.d + other.d) / 2
     cur_ex = max(0.0, abs(dx_c) - half_x)   # current clearance already banked along x
     cur_ey = max(0.0, abs(dy_c) - half_y)   # ... along y
@@ -806,9 +811,19 @@ def _push_vector(mover: Equipment, other: Equipment, min_gap_needed: float, eps:
     move_y = max(0.0, (half_y + need_ey) - abs(dy_c))
     sx = 1.0 if dx_c >= 0 else -1.0
     sy = 1.0 if dy_c >= 0 else -1.0
-    if move_x <= move_y:
-        return sx * (move_x + eps), 0.0
-    return 0.0, sy * (move_y + eps)
+    return [(sx * (move_x + eps), 0.0), (0.0, sy * (move_y + eps))]
+
+def _total_deficit(eq: list, spacing: dict) -> float:
+    """Sum of every pairwise spacing shortfall in eq (0 if none) — the
+    "how far from feasible" score push_repair uses to compare candidate
+    moves against each other."""
+    total = 0.0
+    for i in range(len(eq)):
+        for j in range(i + 1, len(eq)):
+            d = min_gap(eq[i].cls, eq[j].cls, spacing) - edge_gap(eq[i], eq[j])
+            if d > 0:
+                total += d
+    return total
 
 def push_repair(eq: list, site: Site, spacing: dict, keepouts: dict = None, cap: int = 50) -> bool:
     """Legalize a just-dragged (pinned) item's position by translating
@@ -816,41 +831,71 @@ def push_repair(eq: list, site: Site, spacing: dict, keepouts: dict = None, cap:
     one push cascades into a new conflict — before /api/relax hands off to
     item 16's warm-start SA refine. Loop up to `cap` times: find the worst
     (largest deficit) pairwise SPACING violation with at least one movable
-    side, push that side by _push_vector()'s minimum single-axis
-    translation (clamped to site bounds), repeat. Mutates eq in place.
-    Returns True once the layout is fully feasible(), False if `cap` was
-    hit first — the caller must check this and report infeasible honestly
-    rather than trust a partially-repaired layout.
-    ponytail: the worst-violation search re-scans every pair from scratch
-    each iteration (cheap at this tool's item counts — cap * N² edge_gap
-    calls, not the bottleneck _move_feasible optimizes for in solve()'s SA
-    loop) rather than tracking deltas, so the "is the whole layout
-    feasible now" question always has one obviously-correct answer instead
-    of relying on an incremental invariant. Only resolves pairwise
+    side; try both of `_axis_push_candidates()`'s single-axis translations
+    for that side (clamped to site bounds) and keep whichever leaves the
+    lowest `_total_deficit()` across the whole layout, not just whichever
+    move is individually cheaper — the latter is exactly what let a push
+    shove an item into a third one instead of the open side. Mutates eq in
+    place. Returns True once the layout is fully feasible(), False if
+    `cap` was hit first — the caller must check this and report infeasible
+    honestly rather than trust a partially-repaired layout.
+    ponytail: both the worst-violation search and the two-candidate
+    lookahead re-scan every pair from scratch each iteration (cheap at
+    this tool's item counts — cap * N² edge_gap calls, not the bottleneck
+    _move_feasible optimizes for in solve()'s SA loop) rather than
+    tracking deltas, so "is the layout feasible now" and "which candidate
+    is better" both always have one obviously-correct answer instead of
+    relying on an incremental invariant. Only resolves pairwise
     equipment-spacing deficits — a push that would need to route around a
     keepout/rack zone shape, or that lands in someone's pull/wind
     rectangle, is a different geometry problem this heuristic doesn't
     attempt; the final feasible() check catches that and reports failure
-    rather than silently accepting a still-broken layout."""
+    rather than silently accepting a still-broken layout.
+    Fixes a real local-minimum deadlock found while testing this on a
+    never-solved unit (every unpinned item defaulting to (0, 0), so a
+    whole cluster needs separating, not just one pair): the worst
+    violation's only escape route can itself be boundary-clamped back to
+    where it already was (e.g. a vessel wedged between a pinned heater and
+    the site edge) — a permanent no-op that used to get retried every
+    remaining iteration while OTHER violations (a separate concentric
+    cluster elsewhere) never got a turn. Now, if the worst violation's
+    best candidate doesn't actually lower the whole layout's total
+    deficit, that pair is reverted and skipped in favor of the next-worst
+    one for this iteration — so a stuck pair no longer starves every
+    other one of progress."""
     for _ in range(cap):
-        worst = None  # (deficit, a, b)
+        violations = []  # (deficit, a, b), worst first
         for i in range(len(eq)):
             for j in range(i + 1, len(eq)):
                 a, b = eq[i], eq[j]
                 if a.pinned and b.pinned:
                     continue  # neither side can move — not repairable by translation
                 deficit = min_gap(a.cls, b.cls, spacing) - edge_gap(a, b)
-                if deficit > 1e-9 and (worst is None or deficit > worst[0]):
-                    worst = (deficit, a, b)
-        if worst is None:
+                if deficit > 1e-9:
+                    violations.append((deficit, a, b))
+        if not violations:
             return feasible(eq, site, spacing, keepouts)
-        _, a, b = worst
-        mover, other = (a, b) if not a.pinned else (b, a)
-        vec = _push_vector(mover, other, min_gap(mover.cls, other.cls, spacing))
-        if vec is None:
-            return False
-        mover.x = min(max(mover.x + vec[0], mover.w / 2), site.w - mover.w / 2)
-        mover.y = min(max(mover.y + vec[1], mover.d / 2), site.d - mover.d / 2)
+        violations.sort(key=lambda v: v[0], reverse=True)
+        current_total = _total_deficit(eq, spacing)
+        progressed = False
+        for _, a, b in violations:
+            mover, other = (a, b) if not a.pinned else (b, a)
+            need = min_gap(mover.cls, other.cls, spacing)
+            ox, oy = mover.x, mover.y
+            best = None  # (total_deficit_after, x, y)
+            for dx, dy in _axis_push_candidates(mover, other, need):
+                mover.x = min(max(ox + dx, mover.w / 2), site.w - mover.w / 2)
+                mover.y = min(max(oy + dy, mover.d / 2), site.d - mover.d / 2)
+                d = _total_deficit(eq, spacing)
+                if best is None or d < best[0]:
+                    best = (d, mover.x, mover.y)
+            if best[0] < current_total - 1e-9:
+                mover.x, mover.y = best[1], best[2]
+                progressed = True
+                break  # made real progress — re-scan violations fresh next iteration
+            mover.x, mover.y = ox, oy  # this pair is stuck; try the next-worst one instead
+        if not progressed:
+            return False  # every violating pair is stuck — no legal single-item move helps
     return feasible(eq, site, spacing, keepouts)
 
 # --------------------------------------------------------------- DXF writer

@@ -96,22 +96,50 @@ def test_packed_row_drag_legalizes():
     print("OK: packed-row drop legalized by push_repair and passed _check()")
 
 
-def test_concentric_drop_reported_infeasible():
-    """Dropping exactly on top of another item's center is a degenerate
-    case even push_repair can't fix (no push direction is defined for two
-    exactly-concentric rectangles) — must still come back as a clean
-    {feasible: False}, not raise or loop forever."""
+def test_concentric_drop_legalized():
+    """Dropping exactly on top of another item's center — e.g. every
+    unpinned item in a never-solved project defaults to (0, 0), so this is
+    a common starting state, not a rare one — used to be an unresolvable
+    dead end (no push direction is defined for two exactly-concentric
+    rectangles). push_repair now defaults to an arbitrary-but-deterministic
+    direction for that case instead of giving up outright, so this must
+    legalize like any other packed drop."""
     case = _grid_case(n_cols=2, n_rows=1)
     case.pop("_grid_max")
     v0, v1 = case["equipment"]
     req = api.RelaxRequest(data=api.CaseData(**case), tag=v0["tag"], x=v1["x"], y=v1["y"])
     result = api.relax(req)
+    assert result["feasible"], f"concentric drop should now legalize via push_repair: {result}"
+    eq, conns, spacing, site, keepouts = api._build_case(api.CaseData(**case))
+    out_eq = [p.Equipment(**e) for e in result["equipment"]]
+    p._check(out_eq, site, spacing, keepouts)
+    print("OK: concentric drop legalized by push_repair's arbitrary-direction tie-break")
+
+
+def test_impossible_site_reported_infeasible():
+    """A site too small for two items to be separated at all, no matter
+    the direction — push_repair must still come back honestly as
+    {feasible: False} rather than raising, looping forever, or fabricating
+    a bogus success."""
+    spacing = [{"a": "vessel", "b": "vessel", "gap": 3.0}]
+    # 6x6 vessels need a center-to-center distance >= 3+3+3=9m to clear the
+    # gap on any single axis; a 10m site only allows center range [3,7], a
+    # spread of 4m — nowhere near enough room in either axis.
+    equipment = [
+        {"tag": "A", "cls": "vessel", "w": 6, "d": 6, "x": 5, "y": 5},
+        {"tag": "B", "cls": "vessel", "w": 6, "d": 6, "x": 5, "y": 5, "pinned": True},
+    ]
+    case = {"name": "impossible", "equipment": equipment, "connections": [],
+            "site": {"w": 10.0, "d": 10.0, "wind_dir": ""}, "keepouts": {}, "spacing": spacing}
+    req = api.RelaxRequest(data=api.CaseData(**case), tag="A", x=5.0, y=5.0)
+    result = api.relax(req)
     assert result["feasible"] is False and result["cost"] is None, \
         f"expected an honest infeasible report, got: {result}"
-    print("OK: concentric drop reported infeasible honestly (no exception, no fake success)")
+    print("OK: genuinely impossible site reported infeasible honestly (no exception, no fake success)")
 
 
 if __name__ == "__main__":
     test_open_space_drag()
     test_packed_row_drag_legalizes()
-    test_concentric_drop_reported_infeasible()
+    test_concentric_drop_legalized()
+    test_impossible_site_reported_infeasible()
