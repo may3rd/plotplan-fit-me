@@ -314,6 +314,10 @@ Format: `- [date] finding — why it matters`
   `CPSAT_GRID_M` (0.5m) grid, dispatched from `solve_ranked()`
   automatically once movable count exceeds `CPSAT_THRESHOLD` (30) —
   `solve()`/SA untouched below that, `backend/api.py` needed zero changes.
+  (Superseded by item 14: `CPSAT_THRESHOLD` was retired for
+  `CPSAT_SEED_THRESHOLD`, and this hard switch became a
+  CP-SAT-seed-then-SA-refine pipeline via `solve_one()` — see the 07-18
+  entry below.)
   Two correctness traps worth knowing before touching this again: (1)
   pinned equipment's grid box needs `floor(real_left)`/`ceil(real_right)`
   computed independently, not `floor(left)` combined with a
@@ -428,3 +432,69 @@ Format: `- [date] finding — why it matters`
   merged member renders invisible (`.merged-quiet`, CSS `pointer-events:
   all` so it stays clickable) and shows its own true shape again once
   selected.
+- [2026-07-18] Items 12-18 (backend solver upgrade plan, consolidated from
+  two external drafts into PLAN.md — see that doc's non-goals section for
+  why v1's flood-fill distance-engine framing didn't apply) all landed in
+  one session. Item 12 turned out already done (`_move_feasible()`,
+  landed alongside the SSE commit as a prerequisite for cheap per-iteration
+  callbacks) — first sign that PLAN.md and the actual repo state can drift
+  apart even within the same short window; always verify a "not started"
+  item against the code before assuming the plan doc is current. Item 13
+  (swap/relocate moves) restructured `solve()`'s move step around a shared
+  `touched`/`undo()` closure pair per move kind instead of duplicating
+  accept/reject logic per branch — extend that pattern, not a fifth
+  parallel branch, if a new move type is ever added. Item 14 introduced
+  `solve_one()` as the ONE place that decides SA-vs-CP-SAT-seeded-SA per
+  seed — `solve_ranked()` and `api.py`'s `/api/solve` worker both call it
+  now instead of each re-implementing the dispatch (they'd drifted apart
+  before only because the API needed a progress callback `solve_ranked()`
+  didn't expose); `CPSAT_THRESHOLD` (30) was retired for
+  `CPSAT_SEED_THRESHOLD` (15, deliberately lower — CP-SAT+SA-refine beats
+  SA-alone before SA's own init would actually fail). Item 15 added
+  `multiprocessing.Pool` to `solve_ranked()`'s per-seed loop — the worker
+  had to be pulled out to a top-level `_solve_ranked_one()` function
+  (multiprocessing can't pickle a closure to a worker process on macOS's
+  default `spawn` start method). Items 16-17 built Mode 2's real-time
+  layer: `solve()` gained `warm_start` (skip `random_place`, assert the
+  supplied layout is already feasible) for `POST /api/relax` to reflow a
+  layout around one freshly-dragged (temporarily pinned) item; `warm_start`
+  is unrelated to and doesn't touch the CP-SAT-seed pipeline's own
+  internal warm-starting despite the name overlap — two different call
+  sites entirely. `push_repair()`'s `_push_vector()` had a real bug in its
+  first draft: it used the *needed excess-beyond-half-width* itself as the
+  push distance, which silently undershoots by exactly the current overlap
+  depth whenever two footprints deeply overlap (exactly the "dropped right
+  on top of a neighbor" case it exists for) — the fix pushes to the
+  *target absolute center distance* (half-width-sum + needed excess)
+  instead; caught by hand-tracing the geometry, not by a test that merely
+  ran without error, since the buggy version still "worked" (converged,
+  just needed far more iterations, or failed to converge on a scenario a
+  correct push would solve immediately). Also: the push-repair heuristic
+  is deliberately greedy/single-axis — it does NOT plan multi-item
+  cascades, so a drag that requires shuffling three-plus items in
+  coordination can genuinely fail (return infeasible honestly) even though
+  a smarter global rearrangement would succeed; this surfaced while
+  writing `test_relax.py`'s packed-row test, which had to be redesigned
+  around an unobstructed escape axis rather than assuming any "row opens
+  up" scenario is solvable. Item 18 replaced `solve()`'s `on_progress
+  (fraction)` outright with two decoupled callbacks — `on_improve
+  (best_cost, positions, k)` (unthrottled, fires only on a new best) and
+  `should_stop()` (checked every iteration) — rather than overloading one
+  callback's return value for cancellation, since "reporting an
+  improvement" and "should I stop" are genuinely independent questions a
+  caller might want separately. `api.py`'s `/api/solve` SSE loop had to
+  become `async` (polling its queue non-blockingly) specifically so it
+  could also poll `request.is_disconnected()` — a client disconnect now
+  sets a `threading.Event` that `should_stop` reads, so closing the
+  browser tab actually stops burning CPU server-side; CP-SAT's own
+  construction phase still isn't interruptible this way (no stop hook),
+  a documented ceiling, not a bug. One test-writing lesson worth keeping:
+  an early draft of `test_relax.py` built its "already-solved" starting
+  layout via `solve_one()` (which dispatches to `solve_cpsat()` above
+  `CPSAT_SEED_THRESHOLD` items) and got a ~1-in-15 flaky failure —
+  `solve_cpsat`'s `num_search_workers=8` parallel portfolio search is
+  non-deterministic run-to-run even with a fixed `random_seed`, so any
+  test that needs a *specific, reproducible* starting layout should
+  hand-build one (or use plain `solve()`) rather than route through
+  CP-SAT, even indirectly via a helper the code under test doesn't itself
+  call.
