@@ -28,6 +28,7 @@ from plotplan import (
     feasible,
     load_unit,
     piping_cost,
+    solve,
     solve_one,
     write_dxf,
     write_takeoff,
@@ -138,6 +139,42 @@ def score_data(req: ScoreRequest):
     eq, conns, spacing, site, keepouts = _build_case(req.data)
     ok = feasible(eq, site, spacing, keepouts)
     return {"feasible": ok, "cost": piping_cost(eq, conns, site, keepouts) if ok else None}
+
+
+class RelaxRequest(BaseModel):
+    data: CaseData
+    tag: str          # the equipment being dragged
+    x: float          # its new (cursor) position
+    y: float
+    iters: int = 3000  # short + cool vs. a full solve — reflow, not re-optimize
+    t0: float = 3.0
+
+
+@app.post("/api/relax")
+def relax(req: RelaxRequest):
+    """PLAN.md item 16 — Mode 2's core: reflow the rest of the layout
+    around one dragged item. Pins `tag` at (x, y) for this call only (the
+    posted CaseData's own pinned flags are otherwise untouched — this is a
+    fresh in-memory copy, nothing written back), then runs a short, cool SA
+    warm-started from every OTHER item's current position (no
+    random_place) so a drag reads as a live nudge, not a fresh solve.
+    Stateless like /score: nothing persists between calls, the frontend
+    re-posts the whole current layout each time.
+    ponytail: if the dragged position is already infeasible against
+    neighbors, this returns {feasible: false} with positions unchanged
+    rather than attempting to reflow around an infeasible pin — item 17
+    adds a push-repair pass here for the common "dropped into a packed
+    row" case instead of just reporting failure."""
+    eq, conns, spacing, site, keepouts = _build_case(req.data)
+    by_tag = {e.tag: e for e in eq}
+    if req.tag not in by_tag:
+        raise HTTPException(404, f"unknown equipment tag: {req.tag}")
+    dragged = by_tag[req.tag]
+    dragged.x, dragged.y, dragged.pinned = req.x, req.y, True
+    if not feasible(eq, site, spacing, keepouts):
+        return {"feasible": False, "cost": None, "equipment": [asdict(e) for e in eq]}
+    cost = solve(eq, conns, site, spacing, keepouts, seed=0, iters=req.iters, t0=req.t0, warm_start=True)
+    return {"feasible": True, "cost": cost, "equipment": [asdict(e) for e in eq]}
 
 
 class SolveRequest(BaseModel):

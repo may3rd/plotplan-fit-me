@@ -267,18 +267,30 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     0:8) — identical per-seed costs, 9.30s sequential vs. 1.88s parallel
     (4.94x). `test_dxf_merge.py`, `test_cpsat.py`, and the CLI's own
     seeds-0:8 run all unaffected (344 @ seed 1, matching item 14's run).
-16. `[ ]` **Warm-start incremental solve (`POST /api/relax`)** — new
-    endpoint, the core of real-time drag-to-reflow. Request body: full
-    current layout + the dragged tag + its cursor position. Server: mark
-    the dragged item pinned for this call, start every other item at its
-    current position (no `random_place`), run a short cool SA
-    (t0≈3, iters≈2000-5000) via the existing `solve()` with new optional
-    `warm_start=True` and `t0`/`iters` args, return adjusted layout + cost
-    + feasible flag. Target round trip under 200 ms at N=30 (item 12's
-    `_move_feasible` already makes this cheap). Frontend: debounce drag
-    events (~100 ms), render the returned layout as a live preview, commit
-    on drop. ponytail: stateless like `/score`; no session — that's a
-    later concern if ever needed.
+16. `[x]` **Warm-start incremental solve (`POST /api/relax`)** — new
+    endpoint, the core of real-time drag-to-reflow. Request body:
+    `{data: CaseData, tag, x, y, iters=3000, t0=3.0}` — full current layout,
+    the dragged tag, and its new (cursor) position. Server pins that item
+    at `(x, y)` for this call only (a fresh in-memory `Equipment` copy each
+    request, nothing written back), then — if the pinned position is
+    already feasible against everyone else — runs a short, cool SA
+    (`solve(..., warm_start=True)`, item 14's `warm_start` param) starting
+    every other item from its *current* position (no `random_place`), so a
+    drag reads as a live nudge instead of a fresh solve. If the pinned
+    position is already infeasible, returns `{feasible: false, cost: null}`
+    with positions unchanged rather than raising — item 17 adds a
+    push-repair pass for that case instead of just reporting failure.
+    Verified in `backend/test_relax.py`: a hand-built 30-item grid (deterministic
+    — no `solve_one()`/CP-SAT in the test setup, since `relax()` only ever
+    calls `solve()` directly and CP-SAT's parallel search is documented
+    non-deterministic run to run, which an earlier draft of this test
+    learned the hard way) — dragging the corner item 10m clear of the grid
+    round-trips in ~70ms (well under the 200ms/N=30 target) and the rest of
+    the layout reflows and passes `_check()`; a 2-item case dragged directly
+    onto the other equipment returns `{feasible: False, cost: None}`
+    cleanly, no exception. Not built yet: the frontend drag-debounce/
+    live-preview wiring (`PlotCanvas.jsx`) — this item is backend-only,
+    matching how item 10's initial score-on-drag landed backend-first too.
 17. `[ ]` **Push-repair before relax** — when the dragged position
     violates spacing against neighbors, `/relax` first legalizes: loop
     (cap ~50 iterations) find the worst violation involving a movable
