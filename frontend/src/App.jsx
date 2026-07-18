@@ -442,7 +442,7 @@ function App() {
       <StatusBar
         projectLabel={fileName ?? data.name ?? 'untitled'} score={score} cursor={cursor}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
-        tool={tool}
+        tool={tool} realtimeMode={realtimeMode}
       />
     </div>
   )

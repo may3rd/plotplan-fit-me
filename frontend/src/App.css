@@ -168,9 +168,13 @@
   color: var(--muted-foreground);
 }
 
-/* active tool in the ribbon Tools group (Select / Pan / Edit) — blue,
-   thicker border so the current mode is obvious at a glance. */
-.ribbon-group [data-slot='toggle-group-item'][data-state='on'] {
+/* active toggle in the ribbon — Tools group (Select / Pan / Edit), Snap,
+   Real-time, or any future on/off ribbon button — blue, thicker border so
+   the current mode is obvious at a glance. Covers both ToggleGroupItem
+   (data-slot='toggle-group-item') and a standalone Toggle
+   (data-slot='toggle'). */
+.ribbon-group [data-slot='toggle-group-item'][data-state='on'],
+.ribbon-group [data-slot='toggle'][data-state='on'] {
   border-color: var(--office-accent);
   border-width: 2px;
   color: var(--office-accent);
@@ -272,6 +276,14 @@
   width: 1px;
   height: 0.9rem;
   background: var(--border);
+}
+
+/* Home > Real-time indicator — only shown while the toggle is on, same
+   blue as the ribbon's own active-toggle highlight so the two read as one
+   consistent "mode is on" signal. */
+.statusbar-realtime {
+  color: var(--office-accent);
+  font-weight: 600;
 }
 
 /* minimal native range input — no custom track/thumb chrome beyond sizing */

@@ -1,6 +1,8 @@
 import { ZoomDialog } from '@/components/Ribbon'
 
-export default function StatusBar({ projectLabel, score, cursor, zoomPct, setZoomPercent, tool }) {
+export default function StatusBar({
+  projectLabel, score, cursor, zoomPct, setZoomPercent, tool, realtimeMode,
+}) {
   return (
     <div className="statusbar">
       <span>{projectLabel ?? '—'}</span>
@@ -12,6 +14,12 @@ export default function StatusBar({ projectLabel, score, cursor, zoomPct, setZoo
             ? `score ${score.cost.toFixed(0)}`
             : 'infeasible'}
       </span>
+      {realtimeMode && (
+        <>
+          <span className="status-sep" />
+          <span className="statusbar-realtime">⚡ Real-time</span>
+        </>
+      )}
       <span className="ml-auto tabular-nums">
         {cursor ? `x ${cursor.x.toFixed(1)}  y ${cursor.y.toFixed(1)} m` : ''}
       </span>
