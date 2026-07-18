@@ -199,10 +199,114 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     self-check (no fixtures — the unit is synthetic and built in-memory).
     *Effort: L.*
 
+12. `[x]` **Delta feasibility check** — `_move_feasible()`
+    (`backend/plotplan.py:314-376`) checks only the moved/rotated item:
+    bounds, footprint vs every zone, pairwise gaps vs the other N-1 items,
+    pull rect vs others and others' pull rects vs it, wind rects both
+    directions. O(N) per move instead of `feasible()`'s full O(N²)
+    re-check. `solve()`'s SA loop calls it at `plotplan.py:431`; full
+    `feasible()` stays for init, pinned pre-check, and `_check()`. Landed
+    as part of item 18's SSE work (commit e86b41a) — needed to make a
+    per-iteration progress callback cheap enough to fire ~100 times per
+    run without a full O(N²) recheck each time. No separate action needed;
+    listed here only to keep this plan's numbering aligned with the
+    upgrade doc it came from.
+13. `[x]` **Move set: swap + relocate** — `solve()`'s move step now picks
+    one of four moves per iteration (60% translate, 20% rotate, 10% swap,
+    10% relocate) instead of just translate/rotate. `swap` exchanges the
+    centers of two random movable items; `relocate` jumps one item to a
+    uniform random in-bounds position. Both reuse `_move_feasible()`
+    (called once per touched item against the fully post-move layout,
+    which covers every pair a move could have broken, swap included) and
+    a per-branch `undo` closure, sharing one accept/reject block across
+    all four move kinds instead of duplicating revert logic per move type.
+    Verified: sample_unit seeds 0:20 best score improved 378 → 343 (swap
+    lets the solver reorder items a packed row's Gaussian steps couldn't);
+    `test_cpsat.py` and `test_dxf_merge.py` still pass unchanged (CP-SAT
+    path doesn't touch `solve()`'s move step).
+14. `[ ]` **CP-SAT seed → SA refine pipeline** — `solve_ranked()`
+    (`plotplan.py:1090-1117`) still hard-switches at the 30-item
+    threshold: below, SA with `random_place()` scatter init; above,
+    CP-SAT alone (item 11). Change to a pipeline: when movable count >
+    ~15, or whenever `random_place()` fails, build the initial layout with
+    `solve_cpsat()` and then run `solve()` SA from it (skip
+    `random_place`, warm-start from CP-SAT positions). Per-seed diversity:
+    pass the seed into CP-SAT's `random_seed` search parameter. Removes
+    the quality cliff where >30-item layouts never get continuous
+    refinement or the rack-steel-span term optimized. Verify: on
+    `backend/test_cpsat.py`'s 35-item unit, pipeline score < CP-SAT-only
+    score across 4+ seeds, `_check()` passing.
+15. `[ ]` **Parallel seed ranking** — `solve_ranked()`'s seed loop
+    (`plotplan.py:1099-1116`) is sequential. Use stdlib
+    `multiprocessing.Pool` across seeds; each worker deep-copies the unit.
+    Keep the sequential path for 1 seed. Note: `api.py`'s `POST /api/solve`
+    already runs the solve in a background `threading.Thread` to bridge
+    into SSE — that's for async I/O, not CPU parallelism, and is unrelated
+    to this item. Verify: same ranked table as sequential for seeds 0:8,
+    wall time drops.
+16. `[ ]` **Warm-start incremental solve (`POST /api/relax`)** — new
+    endpoint, the core of real-time drag-to-reflow. Request body: full
+    current layout + the dragged tag + its cursor position. Server: mark
+    the dragged item pinned for this call, start every other item at its
+    current position (no `random_place`), run a short cool SA
+    (t0≈3, iters≈2000-5000) via the existing `solve()` with new optional
+    `warm_start=True` and `t0`/`iters` args, return adjusted layout + cost
+    + feasible flag. Target round trip under 200 ms at N=30 (item 12's
+    `_move_feasible` already makes this cheap). Frontend: debounce drag
+    events (~100 ms), render the returned layout as a live preview, commit
+    on drop. ponytail: stateless like `/score`; no session — that's a
+    later concern if ever needed.
+17. `[ ]` **Push-repair before relax** — when the dragged position
+    violates spacing against neighbors, `/relax` first legalizes: loop
+    (cap ~50 iterations) find the worst violation involving a movable
+    item, translate that item along the shortest vector that clears the
+    gap (axis of smallest overlap + required clearance), re-check,
+    repeat; then run the short SA of item 16. Pure stdlib geometry, no
+    physics engine. Reuses `edge_gap`/`min_gap`/`_move_feasible`. Verify:
+    drag test where an item is dropped into a packed row and the row opens
+    up feasibly; cap reached → return infeasible flag honestly instead of
+    looping.
+18. `[~]` **Anytime progress streaming** — partially done. `solve()`
+    already takes `on_progress(fraction)` (`plotplan.py:378-379`, fired
+    ~100x per run via throttled `prog_step`) and `POST /api/solve`
+    (`api.py:150-218`) already streams real SSE (`progress`/`done`
+    events) off a background thread. What's missing vs. the original
+    intent: the callback carries only a 0-1 fraction, not
+    `(best_cost, positions, k)` — so the frontend can show a percent bar
+    but not a live score curve or live-updating incumbent layout during
+    the anneal, only once at the end (the `done` event). Remaining work:
+    change `on_progress` to `on_improve(best_cost, positions, k)`, fired
+    only when SA accepts a new best (default `None`, zero behavior change
+    for CLI callers); thread it through `solve_ranked()`'s per-seed loop;
+    have `POST /api/solve`'s SSE emit an `improve` event per call instead
+    of/alongside the coarse `progress` event. Frontend: live score curve +
+    Stop button. Verify: stream on sample_unit ends at the same score as
+    the non-streaming path for the same seed; stopping mid-run returns a
+    feasible, `_check()`-passing layout.
+
+## Optional later (not scheduled)
+
+- **Nozzle/tie-in offsets** — the Besbes et al. (2021) paper's I/O-point
+  idea (Procedia CIRP 104), the one part of it worth importing: optional
+  `nozzle_dx,nozzle_dy` columns in equipment.csv, used by `piping_cost()`
+  instead of the center. Rotation must then rotate the offset. Cheap
+  realism gain, fully compatible with the analytic rack cost.
+- Penalty-based SA (accept infeasible states with a cost penalty) only if
+  reject-infeasible + item 13 still stalls on very tight sites. Keep
+  reject-infeasible as default: it is simpler and every intermediate
+  layout stays presentable, which item 16/17 depend on.
+
 ## Non-goals (explicit, don't creep in)
 
 3D, ML, terrain/cut-fill, detailed pipe routing (that's a routing tool, not a
-plot plan tool), cost database integration.
+plot plan tool), cost database integration. Also explicitly out: an
+occupancy-grid flood-fill distance engine (Dijkstra/BFS per machine,
+A*-per-pair) for material-handling-cost routing — an early upgrade proposal
+suggested this, modeled on Besbes et al. (2021)'s generic facility-layout
+formulation, but it solves a bottleneck this repo doesn't have.
+`piping_cost()` is already an O(connections) analytic rack-routing formula
+(rise + run + drop along whichever `RACK*` zone is nearest), not an
+A*-per-pair search — there's no flood-fill-shaped hot spot to fix here.
 
 ## Validation checkpoint (still outstanding)
 

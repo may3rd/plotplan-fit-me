@@ -411,38 +411,65 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
         if not movable:
             break  # everything pinned — nothing left to optimize
         t = t0 * (t1 / t0) ** (k / iters)
-        e = rng.choice(movable)
-        # ponytail: 20% of moves are a 90-degree rotation (swap w/d) instead
-        # of a translation — same accept/reject/revert logic either way,
-        # since feasible() already reads w/d for bounds/gap/keepout checks.
-        rotate = rng.random() < 0.2
-        if rotate:
-            e.w, e.d = e.d, e.w
-        else:
+        # ponytail: move mix 60% translate / 20% rotate / 10% swap / 10%
+        # relocate. Gaussian translate alone can't exchange the packing
+        # order of two items in a tight row (swap does, in one move); pure
+        # translate+rotate also loses global exploration as t shrinks and
+        # step size with it (relocate restores a random-restart-sized jump
+        # at any temperature). Each branch sets `touched` (items whose
+        # feasibility needs re-checking) and `undo` (reverts this move only);
+        # accept/reject below is shared across all four move kinds.
+        r = rng.random()
+        if r < 0.6:
+            e = rng.choice(movable)
             ox, oy = e.x, e.y
             e.x = min(max(e.x + rng.gauss(0, t / 4 + 0.5), e.w / 2), site.w - e.w / 2)
             e.y = min(max(e.y + rng.gauss(0, t / 4 + 0.5), e.d / 2), site.d - e.d / 2)
-        # ponytail: local feasibility — only the checks involving e, since
-        # every other item's mutual checks were true before this single-item
-        # move and can't change. ~5x fewer rect-overlap tests per iteration
-        # than re-running the full N²/N×K feasible(), which the profile showed
-        # was 84% of solve time. Exact (not an approximation) for one moved
-        # item; _check() re-runs the full feasible() after the solve.
-        if not _move_feasible(e, eq, site, spacing, kboxes, wind_dir):
-            if rotate:
-                e.w, e.d = e.d, e.w
-            else:
+            touched = (e,)
+            def undo(e=e, ox=ox, oy=oy):
                 e.x, e.y = ox, oy
+        elif r < 0.8:
+            e = rng.choice(movable)
+            e.w, e.d = e.d, e.w
+            touched = (e,)
+            def undo(e=e):
+                e.w, e.d = e.d, e.w
+        elif r < 0.9:
+            if len(movable) < 2:
+                continue
+            e1, e2 = rng.sample(movable, 2)
+            e1.x, e2.x = e2.x, e1.x
+            e1.y, e2.y = e2.y, e1.y
+            touched = (e1, e2)
+            def undo(e1=e1, e2=e2):
+                e1.x, e2.x = e2.x, e1.x
+                e1.y, e2.y = e2.y, e1.y
+        else:
+            e = rng.choice(movable)
+            ox, oy = e.x, e.y
+            e.x = rng.uniform(e.w / 2, site.w - e.w / 2)
+            e.y = rng.uniform(e.d / 2, site.d - e.d / 2)
+            touched = (e,)
+            def undo(e=e, ox=ox, oy=oy):
+                e.x, e.y = ox, oy
+        # ponytail: local feasibility — only the checks involving `touched`,
+        # since every other item's mutual checks were true before this move
+        # and can't change. Checking each touched item against the fully
+        # post-move layout (including the other touched item, for swap)
+        # covers every pair a move could have broken — ~5x fewer rect-overlap
+        # tests per iteration than re-running the full N²/N×K feasible(),
+        # which the profile showed was 84% of solve time. _check() re-runs
+        # the full feasible() after the solve.
+        if not all(_move_feasible(t, eq, site, spacing, kboxes, wind_dir) for t in touched):
+            undo()
             continue
         new = piping_cost(eq, conns, site, keepouts)
         if new < cost or rng.random() < math.exp((cost - new) / t):
             cost = new
             if cost < best:
                 best, best_pos = cost, [(q.x, q.y, q.w, q.d) for q in eq]
-        elif rotate:
-            e.w, e.d = e.d, e.w
         else:
-            e.x, e.y = ox, oy
+            undo()
     for e, (x, y, w, d) in zip(eq, best_pos):
         e.x, e.y, e.w, e.d = x, y, w, d
     if on_progress:
