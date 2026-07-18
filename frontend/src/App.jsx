@@ -30,6 +30,7 @@ function App() {
   const [snap, setSnap] = useState(false)
   const [viewMode, setViewMode] = useState('normal') // 'normal' | 'wireframe' | 'dxf'
   const [tool, setTool] = useState('select') // 'select' | 'pan' | 'edit'
+  const [theme, setTheme] = useState(() => localStorage.getItem('plotplan-theme') || 'system')
   const editMode = tool === 'edit' // when 'edit', zones (road/rack/underground/other) are draggable on the canvas
   const [rackWidth, setRackWidth] = useState(7.5) // meters, pipe-rack width (preferences, later)
   const [rackBeamSpacing, setRackBeamSpacing] = useState(6) // meters, pipe-rack cross-tie beam spacing (preferences, later)
@@ -55,6 +56,22 @@ function App() {
     setScore(null)
     setResults(null)
   }, [])
+
+  // Tools > Customize UI theme picker: 'dark'/'light' force the .dark class
+  // (the shadcn/ui dark palette already defined in index.css/App.css, just
+  // never wired up before); 'system' follows prefers-color-scheme live.
+  useEffect(() => {
+    localStorage.setItem('plotplan-theme', theme)
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const apply = () => {
+      document.documentElement.classList.toggle('dark', theme === 'dark' || (theme === 'system' && mq.matches))
+    }
+    apply()
+    if (theme === 'system') {
+      mq.addEventListener('change', apply)
+      return () => mq.removeEventListener('change', apply)
+    }
+  }, [theme])
 
   useEffect(() => {
     fetch('/api/units').then((r) => r.json()).then((names) => {
@@ -328,6 +345,10 @@ function App() {
         newProject={newProject} openProject={openProject}
         saveProject={saveProject} saveProjectAs={saveProjectAs}
         exportDxf={exportDxf} exportTakeoff={exportTakeoff} exportRaster={exportRaster}
+        theme={theme} setTheme={setTheme}
+        rackWidth={rackWidth} setRackWidth={setRackWidth}
+        rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
+        roadWidth={roadWidth} setRoadWidth={setRoadWidth}
       />
 
       <main className="canvas-area">

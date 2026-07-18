@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Loader2, Magnet,
-  MousePointer2, Pencil, Play, Ruler, Save, Search, Trash2,
+  MousePointer2, Palette, Pencil, Play, Ruler, Save, Search, Settings as SettingsIcon, Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -129,6 +129,110 @@ function ResultsDialog({ results }) {
   )
 }
 
+const THEME_OPTIONS = [
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'system', label: 'Match system' },
+]
+
+// Theme picker — Light/Dark/System toggles the .dark class App.jsx applies
+// to <html>, persisted to localStorage (see App.jsx's theme effect).
+function CustomizeUiDialog({ theme, setTheme }) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="icon" title="Customize UI"><Palette /></Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Customize UI</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-2">
+          <Label className="text-sm text-muted-foreground">Theme</Label>
+          {THEME_OPTIONS.map((o) => (
+            <label key={o.value} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio" name="theme" checked={theme === o.value}
+                onChange={() => setTheme(o.value)}
+              />
+              {o.label}
+            </label>
+          ))}
+        </div>
+        <DialogFooter>
+          <DialogClose asChild><Button variant="outline">Close</Button></DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// App-wide defaults for road/rack drawing — same values the draw-prompt
+// dialog (Insert > Draw road/rack) seeds itself from, editable here without
+// having to start drawing a zone first.
+function SettingsDialog({
+  rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth,
+}) {
+  const [open, setOpen] = useState(false)
+  const [rw, setRw] = useState(rackWidth)
+  const [rbs, setRbs] = useState(rackBeamSpacing)
+  const [rdw, setRdw] = useState(roadWidth)
+
+  useEffect(() => {
+    if (open) { setRw(rackWidth); setRbs(rackBeamSpacing); setRdw(roadWidth) }
+  }, [open, rackWidth, rackBeamSpacing, roadWidth])
+
+  function apply() {
+    const w = Number(rw), b = Number(rbs), d = Number(rdw)
+    if (Number.isFinite(w) && w > 0) setRackWidth(w)
+    if (Number.isFinite(b) && b > 0) setRackBeamSpacing(b)
+    if (Number.isFinite(d) && d > 0) setRoadWidth(d)
+    setOpen(false)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="icon" title="Settings"><SettingsIcon /></Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Settings</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2">
+            <Label htmlFor="set-rack-w" className="w-44 text-sm">Default rack width (m)</Label>
+            <Input
+              id="set-rack-w" type="number" min="0.1" step="0.5" value={rw}
+              onChange={(e) => setRw(e.target.value)} className="w-24"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Label htmlFor="set-rack-b" className="w-44 text-sm">Rack beam spacing (m)</Label>
+            <Input
+              id="set-rack-b" type="number" min="0.1" step="0.5" value={rbs}
+              onChange={(e) => setRbs(e.target.value)} className="w-24"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <Label htmlFor="set-road-w" className="w-44 text-sm">Default road width (m)</Label>
+            <Input
+              id="set-road-w" type="number" min="0.1" step="0.5" value={rdw}
+              onChange={(e) => setRdw(e.target.value)} className="w-24"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
+          <Button onClick={apply}>OK</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export default function Ribbon(props) {
   const {
     units, unitName, setUnitName, seedsInput, setSeedsInput, solve, solving, results,
@@ -137,6 +241,8 @@ export default function Ribbon(props) {
     tool, setTool, bumpDrawPrompt, fit, zoomPct, setZoomPercent,
     bumpEditPrompt, selectedZone, deleteZone,
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
+    theme, setTheme,
+    rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth,
   } = props
 
   const openInputRef = useRef(null)
@@ -192,6 +298,7 @@ export default function Ribbon(props) {
             <TabsTrigger value="home">Home</TabsTrigger>
             <TabsTrigger value="insert">Insert</TabsTrigger>
             <TabsTrigger value="view">View</TabsTrigger>
+            <TabsTrigger value="tools">Tools</TabsTrigger>
           </TabsList>
 
           <Menubar className="titlebar-menubar ml-auto border-0 bg-transparent p-0 shadow-none">
@@ -369,6 +476,20 @@ export default function Ribbon(props) {
               <ToggleGroupItem value="select" title="Select / drag"><MousePointer2 /></ToggleGroupItem>
               <ToggleGroupItem value="pan" title="Pan"><Hand /></ToggleGroupItem>
             </ToggleGroup>
+          </Group>
+        </TabsContent>
+
+        <TabsContent value="tools" className="ribbon-body">
+          <Group label="Appearance">
+            <CustomizeUiDialog theme={theme} setTheme={setTheme} />
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
+          <Group label="Preferences">
+            <SettingsDialog
+              rackWidth={rackWidth} setRackWidth={setRackWidth}
+              rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
+              roadWidth={roadWidth} setRoadWidth={setRoadWidth}
+            />
           </Group>
         </TabsContent>
       </Tabs>
