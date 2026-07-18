@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Loader2, Magnet,
-  MousePointer2, Palette, Pencil, Play, Ruler, Save, Search, Settings as SettingsIcon, Trash2,
+  MousePointer2, Palette, Pencil, Play, Ruler, Save, Search, Settings as SettingsIcon, Trash2, Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -243,6 +243,7 @@ export default function Ribbon(props) {
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
     theme, setTheme,
     rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth,
+    realtimeMode, setRealtimeMode,
   } = props
 
   const openInputRef = useRef(null)
@@ -365,6 +366,15 @@ export default function Ribbon(props) {
                 title="n or a:b" placeholder="n or a:b" className="w-28"
               />
             </div>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
+          <Group label="Real-time">
+            <Toggle
+              variant="outline" pressed={realtimeMode} onPressedChange={setRealtimeMode}
+              title="Real-time move — reflow the layout live around a dragged item (POST /api/relax) instead of just scoring it"
+            >
+              <Zap />
+            </Toggle>
           </Group>
         </TabsContent>
 

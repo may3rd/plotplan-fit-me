@@ -443,6 +443,7 @@ export default function PlotCanvas({
   rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth, drawPromptNonce,
   editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone,
   selectedZone, setSelectedZone, editMode,
+  realtimeMode, relaxLayout, flushRelax,
 }) {
   const { equipment, connections, site, keepouts, spacing, wind_clearance_m: windClearanceM } = data
   const byTag = Object.fromEntries(equipment.map((e) => [e.tag, e]))
@@ -820,11 +821,20 @@ export default function PlotCanvas({
     }
     const nextPositions = { ...positions, [tag]: { x, y } }
     onPositions(nextPositions)
+    // Mode 2 (PLAN.md items 16-17): throttled POST /api/relax alongside the
+    // instant /score feedback above — relax's reflowed positions (everyone
+    // else moved out of the way, not just the dragged tag) land a beat
+    // later and supersede this frame's local-only update.
+    if (realtimeMode) relaxLayout(tag, x, y)
     const pair = closestPair(tag, nextPositions, equipment, spacingMap)
     setMeasure(pair && { ...pair, tag })
   }
 
   function onPointerUp(ev) {
+    // "commit on drop": flush any pending throttled /relax call now, before
+    // clearing dragTag, so the final reflow matches the exact drop position
+    // instead of waiting out the rest of the throttle window.
+    if (realtimeMode && dragTag.current) flushRelax()
     pan.current = null
     dragTag.current = null
     dragZone.current = null

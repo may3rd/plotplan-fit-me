@@ -129,6 +129,63 @@ function App() {
     scoreLayout(next)
   }, [scoreLayout])
 
+  // --- Mode 2: real-time layouting (PLAN.md items 16-17, POST /api/relax) ---
+  // Toggled from the Home ribbon. While on, dragging an item also throttle-
+  // calls /relax, which pins the dragged item at the cursor and reflows
+  // every other item around it (server-side warm-start SA, with push-repair
+  // legalizing a packed-row drop) — /score's per-frame call still runs too,
+  // for the instant local feedback /relax's ~100ms round trip can't match;
+  // /relax's response (feasible flag + reflowed positions) simply supersedes
+  // it a beat later.
+  const [realtimeMode, setRealtimeMode] = useState(false)
+  const relaxReqId = useRef(0)
+  const relaxThrottle = useRef({ lastSentAt: 0, timer: null, latest: null })
+
+  const fireRelax = useCallback(() => {
+    const args = relaxThrottle.current.latest
+    relaxThrottle.current.timer = null
+    relaxThrottle.current.lastSentAt = Date.now()
+    if (!args || !data) return
+    const { tag, x, y } = args
+    const id = ++relaxReqId.current
+    fetch('/api/relax', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: buildCaseData(data, positions), tag, x, y }),
+    })
+      .then((r) => r.json())
+      .then((res) => {
+        if (id !== relaxReqId.current || !res.feasible) return
+        const pos = {}
+        for (const e of res.equipment) pos[e.tag] = { x: e.x, y: e.y }
+        setPositions(pos)
+        setScore({ feasible: true, cost: res.cost })
+      })
+      .catch(() => {}) // ponytail: a dropped relax frame just means the next drag frame (or the on-drop flush) tries again
+  }, [data, positions])
+
+  // ~100ms throttle: fires immediately if it's been >=100ms since the last
+  // call, otherwise schedules one trailing call for whenever that window
+  // ends — always using the LATEST cursor position, so a fast continuous
+  // drag gets a steady trickle of reflows instead of one queued call per
+  // pointermove event.
+  const relaxLayout = useCallback((tag, x, y) => {
+    relaxThrottle.current.latest = { tag, x, y }
+    const elapsed = Date.now() - relaxThrottle.current.lastSentAt
+    if (elapsed >= 100) fireRelax()
+    else if (!relaxThrottle.current.timer) relaxThrottle.current.timer = setTimeout(fireRelax, 100 - elapsed)
+  }, [fireRelax])
+
+  // "commit on drop": fire whatever's pending right away instead of waiting
+  // out the rest of the throttle window, so the final reflow matches the
+  // exact position the item was dropped at with no residual lag.
+  const flushRelax = useCallback(() => {
+    if (relaxThrottle.current.timer) {
+      clearTimeout(relaxThrottle.current.timer)
+      fireRelax()
+    }
+  }, [fireRelax])
+
   // add/remove a keepouts zone (road/rack drawn on canvas, or any other) —
   // changing `data` here re-triggers the scoreLayout effect below, since a
   // zone can flip feasibility just like moving equipment can.
@@ -349,6 +406,7 @@ function App() {
         rackWidth={rackWidth} setRackWidth={setRackWidth}
         rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
         roadWidth={roadWidth} setRoadWidth={setRoadWidth}
+        realtimeMode={realtimeMode} setRealtimeMode={setRealtimeMode}
       />
 
       <main className="canvas-area">
@@ -369,6 +427,7 @@ function App() {
           showGrid={showGrid} showRuler={showRuler} gridStep={gridStep} snap={snap} tool={tool} setTool={setTool}
           viewMode={viewMode}
           editMode={editMode}
+          realtimeMode={realtimeMode} relaxLayout={relaxLayout} flushRelax={flushRelax}
           rackWidth={rackWidth} setRackWidth={setRackWidth}
           rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
           roadWidth={roadWidth} setRoadWidth={setRoadWidth}
