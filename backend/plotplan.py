@@ -8,6 +8,7 @@ Usage: python plotplan.py [data_dir] [seed | start:end]
 """
 import csv
 import math
+import multiprocessing
 import os
 import random
 import sys
@@ -1163,23 +1164,38 @@ def _check(eq: list, site: Site, spacing: dict, keepouts: dict = None, pinned_be
             e = by_tag[tag]
             assert (e.x, e.y) == (x, y), f"pinned {tag} moved from ({x},{y}) to ({e.x},{e.y})"
 
+def _solve_ranked_one(data_dir: str, seed: int):
+    """One seed's worth of solve_ranked()'s loop body — pulled out to a
+    top-level function (not a nested closure) so multiprocessing can pickle
+    and ship it to a worker process. Returns (seed, cost, eq, conns, site,
+    keepouts)."""
+    eq, conns, spacing, site, keepouts = load_unit(data_dir)
+    pinned_before = [(e.tag, e.x, e.y) for e in eq if e.pinned]
+    cost = solve_one(eq, conns, site, spacing, keepouts, seed=seed)
+    _check(eq, site, spacing, keepouts, pinned_before)
+    return seed, cost, eq, conns, site, keepouts
+
 def solve_ranked(data_dir: str, seeds):
     """Solve for each seed (fresh equipment copy per seed, since solve()
     mutates positions in place). Returns (results, best) where results is
     [(seed, cost), ...] sorted by cost and best is
     (cost, eq, conns, site, keepouts) for the winning seed. Shared by the
     CLI (run(), below) and the web API — the ranking loop and its
-    pinned/self-check invariants live in exactly one place."""
-    results = []
-    best = None  # (cost, eq, conns, site, keepouts)
-    for seed in seeds:
-        eq, conns, spacing, site, keepouts = load_unit(data_dir)
-        pinned_before = [(e.tag, e.x, e.y) for e in eq if e.pinned]
-        cost = solve_one(eq, conns, site, spacing, keepouts, seed=seed)
-        _check(eq, site, spacing, keepouts, pinned_before)
-        results.append((seed, cost))
-        if best is None or cost < best[0]:
-            best = (cost, eq, conns, site, keepouts)
+    pinned/self-check invariants live in exactly one place.
+    ponytail: seeds are fully independent (each reloads its own eq/site/
+    keepouts fresh), so multiple seeds run in separate processes via stdlib
+    multiprocessing.Pool — this is CPU-bound SA/CP-SAT work, threads
+    wouldn't help. A single seed skips the Pool (no process-spawn overhead
+    for the common single-seed API call)."""
+    seeds = list(seeds)
+    if len(seeds) <= 1:
+        rows = [_solve_ranked_one(data_dir, s) for s in seeds]
+    else:
+        with multiprocessing.Pool(min(len(seeds), os.cpu_count() or 1)) as pool:
+            rows = pool.starmap(_solve_ranked_one, [(data_dir, s) for s in seeds])
+    results = [(seed, cost) for seed, cost, *_ in rows]
+    best_seed, best_cost, best_eq, best_conns, best_site, best_keepouts = min(rows, key=lambda r: r[1])
+    best = (best_cost, best_eq, best_conns, best_site, best_keepouts)
     results.sort(key=lambda r: r[1])
     return results, best
 

@@ -250,14 +250,23 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     on the existing 32-item synthetic unit across seeds 0-3 — pipeline
     matches or beats CP-SAT-only on every seed; `test_dxf_merge.py` and
     sample_unit CLI (seeds 0:8) unaffected (8 items, well under threshold).
-15. `[ ]` **Parallel seed ranking** — `solve_ranked()`'s seed loop
-    (`plotplan.py:1099-1116`) is sequential. Use stdlib
-    `multiprocessing.Pool` across seeds; each worker deep-copies the unit.
-    Keep the sequential path for 1 seed. Note: `api.py`'s `POST /api/solve`
-    already runs the solve in a background `threading.Thread` to bridge
-    into SSE — that's for async I/O, not CPU parallelism, and is unrelated
-    to this item. Verify: same ranked table as sequential for seeds 0:8,
-    wall time drops.
+15. `[x]` **Parallel seed ranking** — `solve_ranked()`'s per-seed loop body
+    pulled out to a top-level `_solve_ranked_one(data_dir, seed)` (had to be
+    top-level, not a closure, for `multiprocessing` to pickle it to a
+    worker) and run across a stdlib `multiprocessing.Pool` sized
+    `min(len(seeds), os.cpu_count())` — each worker reloads the unit fresh
+    from `data_dir` via `load_unit()`, same as the old sequential loop, so
+    no shared-state issues. A single seed skips the Pool entirely (no
+    process-spawn cost for the common single-seed API-style call). Note:
+    `api.py`'s `POST /api/solve` already runs the solve in a background
+    `threading.Thread` to bridge into SSE — that's for async I/O, not CPU
+    parallelism, and stayed sequential since per-seed progress fractions
+    are attributed assuming seeds run in order. Verified: a scratch script
+    comparing `solve_ranked()`'s parallel path against calling
+    `_solve_ranked_one()` sequentially for the same seeds (sample_unit
+    0:8) — identical per-seed costs, 9.30s sequential vs. 1.88s parallel
+    (4.94x). `test_dxf_merge.py`, `test_cpsat.py`, and the CLI's own
+    seeds-0:8 run all unaffected (344 @ seed 1, matching item 14's run).
 16. `[ ]` **Warm-start incremental solve (`POST /api/relax`)** — new
     endpoint, the core of real-time drag-to-reflow. Request body: full
     current layout + the dragged tag + its cursor position. Server: mark
