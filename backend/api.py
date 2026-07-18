@@ -22,15 +22,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from plotplan import (
-    CPSAT_THRESHOLD,
     Equipment,
     Site,
     WIND_CLEARANCE_M,
     feasible,
     load_unit,
     piping_cost,
-    solve,
-    solve_cpsat,
+    solve_one,
     write_dxf,
     write_takeoff,
 )
@@ -176,21 +174,19 @@ def solve_data(req: SolveRequest):
             for i, seed in enumerate(req.seeds):
                 emit("progress", {"fraction": i / n, "seed": seed, "seed_index": i, "seed_count": n})
                 eq, conns, spacing, site, keepouts = _build_case(req.data)
-                movable = sum(1 for e in eq if not e.pinned)
 
                 # ponytail: SA fires on_progress 100 times across its
                 # iters; map each seed's internal fraction into the whole
                 # solve's [i/n, (i+1)/n] slice so the bar advances
-                # smoothly within a seed too, not just per seed. CP-SAT
-                # only fires 0 and 1 (its search has no progress hook).
+                # smoothly within a seed too, not just per seed. Only
+                # solve_one()'s SA phase fires on_progress (see its
+                # docstring) — CP-SAT's own construction step has no
+                # progress hook.
                 def on_progress(frac, _i=i, _n=n):
                     emit("progress", {"fraction": (_i + frac) / _n, "seed": seed,
                                       "seed_index": _i, "seed_count": _n})
 
-                if movable > CPSAT_THRESHOLD:
-                    cost = solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress)
-                else:
-                    cost = solve(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress)
+                cost = solve_one(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress)
                 results.append((seed, cost))
                 if best is None or cost < best[0]:
                     best = (cost, eq)

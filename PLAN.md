@@ -187,7 +187,10 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     so a grid-feasible solution decoded back to real meters is always
     real-feasible. `solve_ranked()` now dispatches to it automatically once
     movable count exceeds `CPSAT_THRESHOLD` (30) — no new CLI flag, no
-    change needed in `backend/api.py`. Objective optimizes pipe rise+run+
+    change needed in `backend/api.py`. (Superseded by item 14:
+    `CPSAT_THRESHOLD` was retired for `CPSAT_SEED_THRESHOLD`, and the hard
+    switch below became a CP-SAT-seed-then-SA-refine pipeline — see that
+    item for the current dispatch logic.) Objective optimizes pipe rise+run+
     drop (not the rack-steel-span term — see the ponytail note in
     `solve_cpsat()`); the returned score is still the true, complete
     `piping_cost()`. Verified: reproduces SA's exact score (5310) on a site
@@ -224,18 +227,29 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     lets the solver reorder items a packed row's Gaussian steps couldn't);
     `test_cpsat.py` and `test_dxf_merge.py` still pass unchanged (CP-SAT
     path doesn't touch `solve()`'s move step).
-14. `[ ]` **CP-SAT seed → SA refine pipeline** — `solve_ranked()`
-    (`plotplan.py:1090-1117`) still hard-switches at the 30-item
-    threshold: below, SA with `random_place()` scatter init; above,
-    CP-SAT alone (item 11). Change to a pipeline: when movable count >
-    ~15, or whenever `random_place()` fails, build the initial layout with
-    `solve_cpsat()` and then run `solve()` SA from it (skip
-    `random_place`, warm-start from CP-SAT positions). Per-seed diversity:
-    pass the seed into CP-SAT's `random_seed` search parameter. Removes
-    the quality cliff where >30-item layouts never get continuous
-    refinement or the rack-steel-span term optimized. Verify: on
-    `backend/test_cpsat.py`'s 35-item unit, pipeline score < CP-SAT-only
-    score across 4+ seeds, `_check()` passing.
+14. `[x]` **CP-SAT seed → SA refine pipeline** — new `solve_one()` is now
+    the single place that decides how to solve one seed: plain SA below
+    `CPSAT_SEED_THRESHOLD` (15) movable items (with a fallback to the
+    CP-SAT path if `random_place()` still fails there), else
+    `solve_cpsat()` builds a feasible initial layout by construction and
+    `solve(..., warm_start=True)` anneals from it — `solve()` gained a
+    `warm_start` param that skips `random_place()` and instead asserts the
+    supplied layout is already feasible. Replaces item 11's hard switch
+    (SA-only vs. CP-SAT-only) with a pipeline so large layouts get
+    continuous refinement (translate/rotate/swap/relocate) and the
+    rack-steel-span cost term CP-SAT's objective doesn't model. Old
+    `CPSAT_THRESHOLD` (30) retired in favor of `CPSAT_SEED_THRESHOLD` (15,
+    lower on purpose — CP-SAT+refine beats SA-alone before SA's init
+    actually starts failing). `solve_ranked()` (CLI) and `api.py`'s
+    `/api/solve` worker both call `solve_one()` now instead of each
+    re-implementing the same dispatch decision — that duplication existed
+    only because `api.py` needed a progress callback `solve_ranked()`
+    didn't expose; `solve_one()` takes `on_progress` too (wired to the SA
+    phase only — see its docstring on why not the CP-SAT phase). Verified:
+    extended `test_cpsat.py` compares `solve_one()` vs. CP-SAT-only cost
+    on the existing 32-item synthetic unit across seeds 0-3 — pipeline
+    matches or beats CP-SAT-only on every seed; `test_dxf_merge.py` and
+    sample_unit CLI (seeds 0:8) unaffected (8 items, well under threshold).
 15. `[ ]` **Parallel seed ranking** — `solve_ranked()`'s seed loop
     (`plotplan.py:1099-1116`) is sequential. Use stdlib
     `multiprocessing.Pool` across seeds; each worker deep-copies the unit.

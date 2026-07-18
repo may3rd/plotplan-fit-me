@@ -376,20 +376,29 @@ def _move_feasible(e, eq, site, spacing, kboxes, wind_dir):
     return True
 
 def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
-          seed=0, iters=60000, t0=50.0, t1=0.05, on_progress=None) -> float:
+          seed=0, iters=60000, t0=50.0, t1=0.05, on_progress=None, warm_start=False) -> float:
     """Simulated annealing over feasible moves. Returns best cost.
     on_progress: optional callable(fraction in [0,1]) fired ~100 times
     across the run — lets a UI show a real %-done bar instead of a spinner.
     The fraction is k/iters (the loop always runs iters iterations unless
-    every item is pinned), so it's a faithful time estimate, not a guess."""
-    # ponytail: SA + reject-infeasible. CP-SAT/MILP if this stalls on >30 items.
+    every item is pinned), so it's a faithful time estimate, not a guess.
+    warm_start: if True, skip random_place()'s scatter-then-reject init and
+    anneal starting from eq's current x/y/w/d instead — the caller (item
+    14's CP-SAT-seed pipeline) must guarantee that starting layout is
+    already feasible; checked once up front so a bad warm start fails fast
+    with a clear message instead of the SA loop rejecting every move."""
+    # ponytail: SA + reject-infeasible, optionally warm-started from a
+    # CP-SAT-built layout (see solve_one()) instead of a random scatter.
     spacing = DEFAULT_SPACING if spacing is None else spacing
     pinned = [e for e in eq if e.pinned]
     if pinned and not feasible(pinned, site, spacing, keepouts):
         raise RuntimeError("pinned equipment violates site/spacing/keepout constraints on its own")
     movable = [e for e in eq if not e.pinned]
     rng = random.Random(seed)
-    if not random_place(eq, site, spacing, rng, keepouts):
+    if warm_start:
+        if not feasible(eq, site, spacing, keepouts):
+            raise RuntimeError("warm_start=True but the supplied initial layout is infeasible")
+    elif not random_place(eq, site, spacing, rng, keepouts):
         raise RuntimeError("no feasible initial layout — site too small for spacing table")
     # ponytail: precompute keepout bounding boxes (rect-rect overlap is a
     # far cheaper reject than _rect_hits_poly's point-in-polygon, and exact
@@ -477,16 +486,20 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
     return best
 
 # ------------------------------------------------------ CP-SAT solver (item 11)
-# ponytail: only reached above CPSAT_THRESHOLD movable items — see CLAUDE.md
-# self-learning log for the measurement. Past ~30 items, random_place()'s
+# ponytail: exists because past ~27-30 movable items, random_place()'s
 # scatter-then-reject-infeasible init starts failing outright even on a
 # generously oversized site, because the odds of an all-N-item feasible
-# random scatter collapse combinatorially. CP-SAT builds a feasible layout
-# by constraint construction instead of by rejection sampling, so it
-# doesn't have that failure mode — at the cost of a coarse position grid
-# (CPSAT_GRID_M) instead of SA's continuous coordinates.
+# random scatter collapse combinatorially — see CLAUDE.md self-learning for
+# the measurement. CP-SAT builds a feasible layout by constraint
+# construction instead of by rejection sampling, so it doesn't have that
+# failure mode — at the cost of a coarse position grid (CPSAT_GRID_M)
+# instead of SA's continuous coordinates. solve_one() (below solve_cpsat)
+# now hands off to SA for continuous refinement after CP-SAT constructs,
+# starting well before that ~27-30 hard-failure point (see
+# CPSAT_SEED_THRESHOLD) — CP-SAT+refine is strictly better than SA alone
+# once an SA-only random scatter would take many tries even if it hasn't
+# outright failed yet.
 
-CPSAT_THRESHOLD = 30   # movable-item count above which solve_ranked() switches to CP-SAT
 CPSAT_GRID_M = 0.5     # ponytail: position/length discretization for the CP-SAT model.
                        # Every safety-relevant quantity is rounded in the conservative
                        # direction (footprint sizes and clearances UP, site bounds and
@@ -720,6 +733,42 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
         y = solver.Value(B[e.tag]) * G + d / 2
         e.x, e.y, e.w, e.d = x, y, w, d
     return piping_cost(eq, conns, site, keepouts)
+
+# ------------------------------------------- CP-SAT seed -> SA refine (item 14)
+# ponytail: item 11's dispatch was a hard switch — SA alone below
+# CPSAT_THRESHOLD, CP-SAT alone above it — so any layout past the threshold
+# never got SA's continuous refinement (translate/rotate/swap/relocate) or
+# the rack-steel-span cost term CP-SAT's objective doesn't model. Lowering
+# the switchover to CPSAT_SEED_THRESHOLD and always following CP-SAT with an
+# SA warm-start closes that gap: CP-SAT still does the hard part (building a
+# feasible layout by construction where random_place's rejection sampling
+# would fail), SA still does the part it's good at (polishing a feasible
+# layout toward a better one) regardless of item count.
+CPSAT_SEED_THRESHOLD = 15   # movable-item count above which solve_one() seeds with CP-SAT before SA
+
+def solve_one(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
+              seed: int = 0, on_progress=None) -> float:
+    """Solve one seed with the right pipeline, and only one place deciding
+    which: plain SA below CPSAT_SEED_THRESHOLD movable items; above it (or
+    if random_place() still fails below it — a tight site can do that even
+    at small N), solve_cpsat() builds a feasible initial layout by
+    construction, then solve(..., warm_start=True) anneals from it.
+    Mutates eq in place, same contract as solve()/solve_cpsat(). Shared by
+    solve_ranked() (CLI) and api.py's /api/solve worker so this dispatch
+    logic lives in exactly one place instead of two copies drifting apart.
+    on_progress is only wired to the SA phase — CP-SAT's own construction
+    step has no progress hook (see solve_cpsat) and firing on_progress(0..1)
+    once for construction then again for SA refine would make a %-done bar
+    visibly jump backward for no benefit."""
+    movable = sum(1 for e in eq if not e.pinned)
+    if movable <= CPSAT_SEED_THRESHOLD:
+        try:
+            return solve(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress)
+        except RuntimeError as exc:
+            if "no feasible initial layout" not in str(exc):
+                raise
+    solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed)
+    return solve(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress, warm_start=True)
 
 # --------------------------------------------------------------- DXF writer
 # ponytail: hand-rolled DXF R12 (plain text) — ezdxf not needed for lines+text.
@@ -1126,16 +1175,7 @@ def solve_ranked(data_dir: str, seeds):
     for seed in seeds:
         eq, conns, spacing, site, keepouts = load_unit(data_dir)
         pinned_before = [(e.tag, e.x, e.y) for e in eq if e.pinned]
-        # ponytail: item 11's gate, measured — see CLAUDE.md self-learning.
-        # random_place()'s scatter-then-reject init starts failing outright
-        # above CPSAT_THRESHOLD movable items even on a generously sized
-        # site, so CP-SAT (builds a feasible layout by construction) takes
-        # over there instead of SA.
-        movable = sum(1 for e in eq if not e.pinned)
-        if movable > CPSAT_THRESHOLD:
-            cost = solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed)
-        else:
-            cost = solve(eq, conns, site, spacing, keepouts, seed=seed)
+        cost = solve_one(eq, conns, site, spacing, keepouts, seed=seed)
         _check(eq, site, spacing, keepouts, pinned_before)
         results.append((seed, cost))
         if best is None or cost < best[0]:

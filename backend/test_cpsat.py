@@ -29,10 +29,29 @@ def build_unit(n=32, seed=1):
         __import__("os").path.join(__import__("os").path.dirname(__file__),
                                     "data", "sample_unit", "spacing.csv")), site, keepouts
 
+def test_pipeline_beats_cpsat_only(seeds=(0, 1, 2, 3)):
+    """PLAN.md item 14: solve_one()'s CP-SAT-seed-then-SA-refine pipeline
+    must be at least as good as the old CP-SAT-only path (item 11) on the
+    same unit/seed, since SA refinement can only improve on what CP-SAT
+    constructed (or leave it unchanged, if SA can't find a better move)."""
+    for seed in seeds:
+        eq_pipe, conns, spacing, site, keepouts = build_unit()
+        pinned_before = [(e.tag, e.x, e.y) for e in eq_pipe if e.pinned]
+        pipe_cost = p.solve_one(eq_pipe, conns, site, spacing, keepouts, seed=seed)
+        p._check(eq_pipe, site, spacing, keepouts, pinned_before)
+
+        eq_cpsat, conns2, spacing2, site2, keepouts2 = build_unit()
+        cpsat_cost = p.solve_cpsat(eq_cpsat, conns2, site2, spacing2, keepouts2, seed=seed, time_limit_s=15.0)
+
+        assert pipe_cost <= cpsat_cost + 1e-6, (
+            f"seed {seed}: pipeline cost {pipe_cost:.0f} worse than "
+            f"CP-SAT-only cost {cpsat_cost:.0f}")
+    print(f"OK: solve_one() pipeline <= CP-SAT-only cost across seeds {list(seeds)}")
+
 def main():
     eq, conns, spacing, site, keepouts = build_unit()
-    assert sum(1 for e in eq if not e.pinned) > p.CPSAT_THRESHOLD, \
-        "test unit must exceed CPSAT_THRESHOLD to actually exercise the CP-SAT path"
+    assert sum(1 for e in eq if not e.pinned) > p.CPSAT_SEED_THRESHOLD, \
+        "test unit must exceed CPSAT_SEED_THRESHOLD to actually exercise the CP-SAT path"
     pinned_before = [(e.tag, e.x, e.y) for e in eq if e.pinned]
 
     cost = p.solve_cpsat(eq, conns, site, spacing, keepouts, seed=0, time_limit_s=15.0)
@@ -44,6 +63,8 @@ def main():
     assert (by_tag["E-000"].x, by_tag["E-000"].y) == (20.0, 15.0), "pinned item must not move"
 
     print(f"OK: {len(eq)} items, cost={cost:.0f}, all _check() assertions passed")
+
+    test_pipeline_beats_cpsat_only()
 
 if __name__ == "__main__":
     main()
