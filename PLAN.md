@@ -288,9 +288,12 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     round-trips in ~70ms (well under the 200ms/N=30 target) and the rest of
     the layout reflows and passes `_check()`; a 2-item case dragged directly
     onto the other equipment returns `{feasible: False, cost: None}`
-    cleanly, no exception. Not built yet: the frontend drag-debounce/
-    live-preview wiring (`PlotCanvas.jsx`) — this item is backend-only,
-    matching how item 10's initial score-on-drag landed backend-first too.
+    cleanly, no exception. Frontend wiring (`PlotCanvas.jsx`/`App.jsx`) —
+    a Home ribbon "Real-time" toggle, throttled ~100ms `/relax` calls
+    during drag, flush-on-drop — landed afterward at explicit user request;
+    off by default. Verified in-browser: toggling on and dragging one item
+    reflows a second, non-dragged item elsewhere (confirmed via network
+    log); toggling off fires zero `/relax` calls on a subsequent drag.
 17. `[x]` **Push-repair before relax** — new `push_repair(eq, site,
     spacing, keepouts, cap=50)` in `plotplan.py`: loop up to `cap` times,
     find the worst (largest deficit) pairwise spacing violation with at
