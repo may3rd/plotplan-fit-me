@@ -16,6 +16,42 @@
   min-height: 0; /* let the grid row actually constrain the canvas */
   background: #eceef1;
   overflow: hidden;
+  position: relative; /* anchor for the solve-progress bar */
+}
+
+/* ponytail: determinate top progress bar driven by SSE progress events from
+   /api/solve — one `progress` event per seed-start + ~100 per SA iteration
+   batch, mapped into a [0,1] fraction across the whole solve. The label
+   shows the percent and which seed is running. */
+.solve-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  z-index: 50;
+  background: color-mix(in oklch, var(--office-accent) 8%, transparent);
+  overflow: hidden;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+}
+.solve-progress-bar {
+  height: 100%;
+  background: var(--office-accent);
+  transition: width 0.15s ease-out;
+}
+.solve-progress-label {
+  position: absolute;
+  right: 6px;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--office-accent-dark);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- ribbon + menu bar (Word-style: floating rounded card) --------------- */

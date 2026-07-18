@@ -17,6 +17,7 @@ function App() {
   const [score, setScore] = useState(null) // {feasible, cost}
   const [seedsInput, setSeedsInput] = useState('0:8')
   const [solving, setSolving] = useState(false)
+  const [solveProgress, setSolveProgress] = useState(null) // {fraction, seed, seed_index, seed_count} | null
   const [results, setResults] = useState(null) // [{seed, cost}, ...] from the last solve
 
   // view / canvas state
@@ -167,6 +168,7 @@ function App() {
 
   async function solve() {
     setSolving(true)
+    setSolveProgress({ fraction: 0, seed: null, seed_index: 0, seed_count: 1 })
     try {
       const seeds = seedsInput.includes(':')
         ? (() => {
@@ -176,10 +178,47 @@ function App() {
         : [Number(seedsInput)]
       const r = await fetch('/api/solve', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
         body: JSON.stringify({ data: buildCaseData(data, positions), seeds }),
       })
-      const result = await r.json()
+      if (!r.ok || !r.body) throw new Error(`solve failed: ${r.status}`)
+      // ponytail: /api/solve is now an SSE stream (POST, so no EventSource —
+      // parse text/event-stream chunks by hand from the ReadableStream).
+      // One `progress` event per seed-start + ~100 per SA solve, then a
+      // final `done` (or `error`) event. Buffer-splitting on "\n\n" is the
+      // whole SSE frame boundary; the `event:`/`data:` lines are the spec.
+      const reader = r.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      let result = null
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        let idx
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const frame = buf.slice(0, idx)
+          buf = buf.slice(idx + 2)
+          const evt = { event: 'message', data: '' }
+          for (const line of frame.split('\n')) {
+            const colon = line.indexOf(':')
+            if (colon < 0) continue
+            const k = line.slice(0, colon).trim()
+            const v = line.slice(colon + 1).replace(/^ /, '')
+            if (k === 'event') evt.event = v
+            else if (k === 'data') evt.data = v
+          }
+          const payload = evt.data ? JSON.parse(evt.data) : {}
+          if (evt.event === 'progress') {
+            setSolveProgress(payload)
+          } else if (evt.event === 'done') {
+            result = payload
+          } else if (evt.event === 'error') {
+            throw new Error(payload.message || 'solve error')
+          }
+        }
+      }
+      if (!result) throw new Error('solve stream ended without a result')
       const pos = {}
       for (const e of result.equipment) pos[e.tag] = { x: e.x, y: e.y }
       setPositions(pos)
@@ -187,6 +226,7 @@ function App() {
       setResults(result.results)
     } finally {
       setSolving(false)
+      setSolveProgress(null)
     }
   }
 
@@ -291,6 +331,17 @@ function App() {
       />
 
       <main className="canvas-area">
+        {solving && solveProgress && (
+          <div className="solve-progress" aria-busy="true" role="progressbar"
+               aria-valuenow={Math.round(solveProgress.fraction * 100)}
+               aria-valuemin={0} aria-valuemax={100}>
+            <div className="solve-progress-bar"
+                 style={{ width: `${solveProgress.fraction * 100}%` }} />
+            <span className="solve-progress-label">
+              {Math.round(solveProgress.fraction * 100)}%
+            </span>
+          </div>
+        )}
         <PlotCanvas
           data={data} positions={positions} onPositions={onPositions}
           view={view} setView={setView}

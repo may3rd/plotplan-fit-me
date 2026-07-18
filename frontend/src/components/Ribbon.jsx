@@ -103,22 +103,24 @@ function ResultsDialog({ results }) {
         <DialogHeader>
           <DialogTitle>Seed results</DialogTitle>
         </DialogHeader>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-muted-foreground">
-              <th className="pb-1">Seed</th>
-              <th className="pb-1">Score</th>
-            </tr>
-          </thead>
-          <tbody>
-            {[...results].sort((a, b) => a.cost - b.cost).map((r) => (
-              <tr key={r.seed} className={r.cost === bestCost ? 'font-semibold' : ''}>
-                <td>{r.seed}</td>
-                <td>{r.cost.toFixed(0)}{r.cost === bestCost ? ' (best)' : ''}</td>
+        <div className="max-h-[60vh] overflow-y-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-background">
+              <tr className="text-left text-muted-foreground">
+                <th className="pb-1">Seed</th>
+                <th className="pb-1">Score</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {[...results].sort((a, b) => a.cost - b.cost).map((r) => (
+                <tr key={r.seed} className={r.cost === bestCost ? 'font-semibold' : ''}>
+                  <td>{r.seed}</td>
+                  <td>{r.cost.toFixed(0)}{r.cost === bestCost ? ' (best)' : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
         <DialogFooter>
           <DialogClose asChild><Button variant="outline">Close</Button></DialogClose>
         </DialogFooter>

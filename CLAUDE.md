@@ -35,11 +35,11 @@ plotplan-fit-me/
 explicit user ask and a real-unit validation checkpoint; the user chose to
 unblock item 10 explicitly ahead of that checkpoint (still outstanding, see
 PLAN.md). The gate no longer applies — `frontend/` is a real Vite/React app
-now, not a placeholder. Any *further* frontend work (new pages, a build
-pipeline, a UI framework beyond plain React/SVG) should still get a quick
-sanity check with the user rather than assumed, since the original ask was
-scoped to "drag equipment, live score, Solve button" — not a general go-ahead
-for arbitrary frontend expansion.
+now, not a placeholder, and has since grown well past the original ask
+(zone drawing, road/rack merging, view modes). Any *further* frontend
+expansion (new pages, a build pipeline, a UI framework/state library beyond
+plain React/SVG + `useState`) should still get a quick sanity check with the
+user rather than assumed.
 
 ## How to work in this repo
 
@@ -62,6 +62,12 @@ for arbitrary frontend expansion.
   roadmap item that needs it. If tempted, check PLAN.md non-goals first.
 - When a CSV format changes (new column, new file), update `backend/HELP.md`
   in the same change — it's the format reference, not just PLAN.md's changelog.
+- Several core data shapes have changed repeatedly as roadmap items landed
+  (`load_unit()`'s return tuple, `run()`'s `best` tuple, `Site`'s fields,
+  the set of special `keepouts` zone prefixes). **Grep for the symbol before
+  touching a call site** — don't trust memory of its old shape; the
+  Self-learning log below records why each change happened, not always
+  what the *current* shape is.
 
 ## How the CLI works right now
 
@@ -80,6 +86,54 @@ python plotplan.py [data_dir] [seed | start:end]
 `solve()` mutates `Equipment.x/y` in place, so reuse across seeds would leak
 positions between runs. Keep that reload pattern for any future per-seed
 loop.
+
+## How the frontend works
+
+`frontend/` is a Vite + React app: one `App.jsx` owning all state, driving
+two components — `Ribbon.jsx` (the Word-style toolbar/menus) and
+`PlotCanvas.jsx` (the SVG plot itself: equipment, zones, connections, and
+essentially all rendering/interaction logic). No state library, no UI kit
+beyond shadcn/ui primitives — `useState` is enough for this size; don't add
+one without asking.
+
+A project is `data = {equipment, connections, site, keepouts, spacing,
+wind_clearance_m, name}` plus a separate `positions` map (`tag -> {x,y}`)
+that the canvas mutates as equipment gets dragged. `keepouts` is the same
+`{zone_name: [[x,y],...]}` shape the backend's keepouts.csv loads into —
+`ROAD*`/`RACK*`/`MAINT*` prefixes get special rendering (color, hatch,
+merging), anything else renders as a generic keep-out. File > Save/Open
+round-trips the whole `data` object as JSON (`src/lib/project.js`); a
+project never has to correspond to an on-disk backend unit.
+
+Drawing a zone (Insert > Draw road/rack/maint/underground/keepout) is one
+press-drag-release gesture, not two clicks. `DRAW_KINDS[kind].shape` in
+PlotCanvas.jsx picks the interaction — `'centerline'` (road/rack: a plain
+tap drops a full-site-width horizontal line; dragging gives a custom h/v
+line snapped to whichever axis the drag is closer to) or `'rect'`
+(maint/underground/keepout: a tap drops a fixed 10m square centered on the
+click, dragging gives a custom two-corner rectangle). Extend that map for
+a new zone kind rather than special-casing by kind elsewhere.
+
+Roads and pipe racks that overlap/touch get merged into one visual shape
+instead of showing a seam at the join — always a pure rendering overlay:
+the underlying `keepouts` entries are never combined or deleted, a merged
+member just renders invisible (`.merged-quiet`, still clickable via CSS
+`pointer-events: all`) and shows its own true shape again once selected.
+Roads merge on *any* overlap/touch regardless of orientation (a chain reads
+as one continuous road) with rounded corners at real turns. Pipe racks
+merge *only* where they actually cross (perpendicular — same-orientation
+overlaps stay separate, distinct segments), into the true L/T-shaped union
+of the real footprints, with sharp corners (no rounding — racks are
+structural corridors, not vehicle paths). Both reuse the same
+`clusterZones`/`unionRoadOutline`/`withCornerFills` trio with a different
+merge predicate; see the 2026-07-18 Self-learning entry for the geometry
+details.
+
+View mode (Normal / Wireframe / DXF, in the View tab, `viewMode` prop) only
+changes how PlotCanvas.jsx renders — fill vs. outline-only vs. a monochrome
+DXF-like preview that shows every zone's true separate/unrounded shape and
+real name. It never touches `data`/`keepouts`, and every merge/rounding
+feature above is gated `!== 'dxf'` since the real DXF export never merges.
 
 ## equipment.csv format
 
@@ -115,12 +169,14 @@ Rows sharing a `zone` name form one polygon, vertices in the order given
 (closes automatically). A unit with no `keepouts.csv` gets an empty zone
 dict — fully backward compatible, no behavior change.
 
-**Roads and maintenance corridors are not a separate mechanism** — they're
-keepout zones with a naming convention: a zone name starting with `ROAD`
-draws on the `ROADS` DXF layer, `MAINT` draws on `MAINT`, anything else
-draws on generic `KEEPOUT`. All three are checked identically in
-`feasible()`. Don't build a second zone-loading path for roads if asked —
-point at this convention instead.
+**Roads, pipe racks, and maintenance corridors are not a separate
+mechanism** — they're keepout zones with a naming convention: a zone name
+starting with `ROAD` draws on the `ROADS` DXF layer, `RACK` draws on the
+`RACK` layer (and is the piping-cost/CP-SAT routing target — see
+`_rack_zones()`), `MAINT` draws on `MAINT`, anything else draws on generic
+`KEEPOUT`. All are checked identically in `feasible()`. Don't build a
+second zone-loading path for roads or racks if asked — point at this
+convention instead.
 
 The overlap check (`_rect_hits_poly`) samples each equipment's 4 corners +
 center against the polygon, plus the polygon's vertices against the
@@ -149,7 +205,8 @@ strip as the live examples.
 This section is a running log Claude keeps for itself across sessions —
 things learned about this specific codebase/domain that aren't obvious from
 reading the code cold. Append short entries here as they're discovered.
-Prune entries that get superseded.
+Prune or condense entries that get superseded — a note that a mechanism was
+fully replaced is worth more than the stale details of how it used to work.
 
 Format: `- [date] finding — why it matters`
 
@@ -177,10 +234,9 @@ Format: `- [date] finding — why it matters`
   extend that same function rather than adding a second checker when the
   next per-item invariant shows up.
 - [2026-07-16] Item 4 (polygon keep-outs) done. `load_unit()` now returns a
-  5-tuple (added `keepouts` at the end) — grep for `load_unit(` before
-  adding a 6th thing rather than trusting memory that every call site got
-  updated. `feasible()`/`random_place()`/`solve()`/`_check()` all take a
-  `keepouts` param threaded alongside `spacing`.
+  5-tuple (added `keepouts` at the end). `feasible()`/`random_place()`/
+  `solve()`/`_check()` all take a `keepouts` param threaded alongside
+  `spacing`.
 - [2026-07-16] Item 5 done. Roads/maintenance corridors needed *no* new
   loading mechanism — reused keepouts.csv with a name-prefix convention for
   DXF layer routing (`_zone_layer()`). Only genuinely new thing was
@@ -193,15 +249,13 @@ Format: `- [date] finding — why it matters`
   new constraint type going forward should get a DXF layer too, not just a
   `feasible()` check.
 - [2026-07-16] Item 6 (quantity takeoff CSV) done. `run()`'s `best` tuple
-  grew again — now `(cost, eq, conns, site, keepouts)`, 5 elements. Same
-  "grep before assuming" caution as item 4's `load_unit()` change applies
-  here too if `best`'s shape changes again. `write_takeoff()` is pure
-  reporting: it never touches solver state, only reads the already-solved
-  layout. Deliberately did NOT factor the per-connection length formula out
-  into a shared helper with `piping_cost()` — two independent
-  implementations plus an assert that they agree is a better regression
-  net than one shared function that could be wrong in a way that's
-  invisible from either caller.
+  grew again — now `(cost, eq, conns, site, keepouts)`, 5 elements.
+  `write_takeoff()` is pure reporting: it never touches solver state, only
+  reads the already-solved layout. Deliberately did NOT factor the
+  per-connection length formula out into a shared helper with
+  `piping_cost()` — two independent implementations plus an assert that
+  they agree is a better regression net than one shared function that
+  could be wrong in a way that's invisible from either caller.
 - [2026-07-16] Item 7 (equipment rotation) done. No new `Equipment` field —
   rotation is just `e.w, e.d = e.d, e.w` inside `solve()`'s move step (20%
   of moves, coin-flipped alongside the existing translation move), since
@@ -209,31 +263,12 @@ Format: `- [date] finding — why it matters`
   `w`/`d` directly and don't care how the item got that footprint. Only
   ripple: `best_pos` snapshots in `solve()` grew from `(x, y)` to
   `(x, y, w, d)` tuples so the best-found layout can preserve rotations.
-  `_check()` needed zero changes — its existing feasible/gap/keepout/pull
-  assertions already cover a rotated footprint. Pinned equipment is
-  excluded from `movable`, so it never rotates, matching how it already
-  never translates.
-- [2026-07-16] Item 8 (multiple racks) done. `Site.rack_y`/`rack_half`
-  (two scalar fields) became `Site.racks: list[(rack_y, rack_half)]` — grep
-  for `site.rack` before assuming a call site still has the old fields,
-  same caution as `load_unit()`'s and `best`'s past shape changes.
-  `site.csv` reuses the keepouts.csv "grouped rows" pattern: one row per
-  rack, `w`/`d` only read from row 0. `feasible()`'s rack-corridor checks
-  (both the plain footprint one and the pull-clearance one) became `any(...
-  for ry, rhalf in site.racks)` instead of a single comparison — loop over
-  every rack, not just check the nearest one, since equipment must clear
-  *all* corridors. `piping_cost()` now does two things per connection:
-  picks the rack minimizing rise+drop (an `min(..., key=...)` over
-  `site.racks`), and separately accumulates `RACK_STEEL_COST_PER_M ×` the
-  x-span of whichever equipment got routed onto each rack, so adding a
-  rack has a real cost, not just a free routing option. `write_takeoff()`
-  deliberately does NOT call the same rack-selection code as
-  `piping_cost()` — same reasoning as item 6, two independent
-  implementations plus `run()`'s existing total-cost assert catches drift
-  between them. `rack_span_used` takeoff rows changed shape: now one row
-  per rack in use, labeled `y=<rack_y>` in the `b` column, instead of one
-  whole-site row — any code reading that CSV by row-count/position instead
-  of `type` value would break.
+  Pinned equipment is excluded from `movable`, so it never rotates, matching
+  how it already never translates.
+- [2026-07-16] Item 8 (multiple racks) originally added `Site.racks:
+  list[(rack_y, rack_half)]` (two-scalar `Site.rack_y`/`rack_half` became a
+  list) — **fully superseded** by the 07-17 rack-to-keepouts-zone refactor
+  below. `Site` is just `w, d, wind_dir` now; `site.racks` no longer exists.
 - [2026-07-16] Item 9 (prevailing wind) done. `Site.wind_dir` follows the
   same "only read from the first CSV row" pattern as `w`/`d` — no new
   loading mechanism. The one refactor: `_pull_rect()`'s x+/x-/y+/y-
@@ -252,21 +287,12 @@ Format: `- [date] finding — why it matters`
   of the as-built validation checkpoint. `run()`'s seed-ranking loop got
   pulled out into `solve_ranked(data_dir, seeds) -> (results, best)` (no
   file writes) so `backend/api.py` could reuse it byte-for-byte instead of
-  re-implementing the loop — verified the CLI's printed scores are
-  unchanged after the refactor before writing any API code. `backend/.venv`
-  is a real venv (Homebrew's system Python is externally-managed and
-  refuses bare `pip install`) — `requirements.txt` has just `fastapi` +
-  `uvicorn[standard]`, nothing else. The `/score` endpoint intentionally
-  returns only `{feasible, cost}`, no per-violation detail — `feasible()`
-  returns a bare bool with no reason, and threading reasons through would
-  touch every check in `feasible()`; skipped for this pass, `cost: null`
-  when infeasible since `piping_cost()` is meaningless there.
-  `frontend/App.jsx` is deliberately one component: unit picker, an SVG
-  plot (native SVG, no canvas/chart lib — site/racks/keepouts/connections/
-  equipment, y-flipped for north-up), drag-to-score (posts to `/score` on
-  every pointermove, guards against out-of-order responses with a request-
-  id ref), and a Solve button hitting `/solve` with the same seed/`a:b`
-  syntax as the CLI. No state library, no UI kit — `useState` was enough.
+  re-implementing the loop. `backend/.venv` is a real venv (Homebrew's
+  system Python is externally-managed and refuses bare `pip install`) —
+  `requirements.txt` has just `fastapi` + `uvicorn[standard]`. The
+  `/score` endpoint intentionally returns only `{feasible, cost}`, no
+  per-violation detail — `feasible()` returns a bare bool with no reason,
+  and threading reasons through would touch every check in `feasible()`.
   One gotcha: `preview_start`'s own subprocess launcher failed for the
   FastAPI backend ("getcwd: cannot access parent directories: Operation
   not permitted") even with absolute paths in `.claude/launch.json` — ran
@@ -274,126 +300,131 @@ Format: `- [date] finding — why it matters`
   `preview_start`/the Browser pane for the Vite frontend, which worked
   fine from launch.json. If that error recurs, don't keep retrying
   preview_start with path tweaks — go straight to Bash.
-- [2026-07-16] Item 11's gate ("only if SA stalls on >30 items") tested with
-  a synthetic unit generator (scratchpad, not committed — realistic class
-  mix matching sample_unit's proportions: heaters rare, exchangers/pumps
-  dominant, since fired_heater's 15m omnidirectional spacing is what breaks
-  small sites, not equipment count alone). Confirmed the gate is true:
-  `random_place()`'s pure-random-scatter-then-reject-infeasible init starts
-  failing outright around N=27-30 even on a site sized ~4x more generously
-  (by area ratio) than sample_unit's — and even there, 1 of 8 seeds still
-  hit the `RuntimeError` at N=30. Where init did succeed, full `solve()`
-  (60000 iters, unchanged from N=8) took ~8s/seed vs ~3.8s/seed at N=8, and
-  cross-seed score spread widened to ~25% (5003-6242) vs sample_unit's
-  ~16% (394-457) — same iteration budget spread over more variables
-  converges less reliably, not just slower. Net: item 11 is justified, not
-  speculative — the failure mode is really in `random_place()`'s
-  initialization strategy (probability of an all-N-item-feasible random
-  scatter collapses combinatorially), which a CP-SAT/MILP replacement would
-  sidestep entirely by construction. Have not yet implemented it — next
-  step if asked is either replace just the init (seed SA from a
-  constructive/greedy placement instead of pure random) or the full
-  OR-tools swap PLAN.md item 11 describes.
-- [2026-07-16] Item 11 (CP-SAT/MILP) implemented. `solve_cpsat()` mirrors
-  `feasible()`'s constraint set (bounds/racks/keepouts/spacing/pull/wind/
-  pinned) as CP-SAT linear/disjunctive constraints on a `CPSAT_GRID_M`
-  (0.5m) grid, dispatched from `solve_ranked()` automatically once movable
-  count exceeds `CPSAT_THRESHOLD` (30) — `solve()`/SA is untouched below
-  that, `backend/api.py` needed zero changes since it only calls
-  `solve_ranked()`. Two correctness traps hit and fixed during
-  implementation, worth knowing before touching this function again:
-  (1) pinned equipment's grid box can't be `floor(left)` combined with a
+- [2026-07-16] Item 11 (CP-SAT/MILP) implemented, after confirming the gate
+  ("only if SA stalls on >30 items") with a synthetic unit generator
+  (scratchpad, not committed): `random_place()`'s pure-random-scatter-then-
+  reject-infeasible init starts failing outright around N=27-30 even on a
+  site sized ~4x more generously (by area) than sample_unit's, and even
+  successful runs saw cross-seed score spread widen to ~25% vs
+  sample_unit's ~16% — the failure is really in `random_place()`'s init
+  strategy, not solver quality, which a constructive solver sidesteps by
+  construction.
+  `solve_cpsat()` mirrors `feasible()`'s constraint set (bounds/racks/
+  keepouts/spacing/pull/wind/pinned) as CP-SAT constraints on a
+  `CPSAT_GRID_M` (0.5m) grid, dispatched from `solve_ranked()`
+  automatically once movable count exceeds `CPSAT_THRESHOLD` (30) —
+  `solve()`/SA untouched below that, `backend/api.py` needed zero changes.
+  Two correctness traps worth knowing before touching this again: (1)
+  pinned equipment's grid box needs `floor(real_left)`/`ceil(real_right)`
+  computed independently, not `floor(left)` combined with a
   separately-`ceil`'d width — those two roundings don't compose into a box
-  that's guaranteed to *contain* the real footprint; had to compute
-  `floor(real_left)` and `ceil(real_right)` independently and take the
-  difference as the grid width. (2) CP-SAT's non-strict `<=`/`>=`
-  constraints let it place solutions exactly touching a clearance boundary,
-  which floating-point noise can then flip to a violation once decoded to
-  real meters and re-checked by `feasible()`'s strict `<`; fixed by padding
-  every required-minimum conversion (pairwise gap, rack half-width) with
-  `CPSAT_EPS_M` (1cm) before rounding, so decoded solutions clear the real
-  check with margin instead of landing exactly on its float boundary.
-  Zero-margin checks (pull clearance, wind — plain non-overlap, no minimum
-  distance) don't need this, only the ones with an actual required-distance
-  threshold do. The objective deliberately does NOT include the rack-steel-
-  span term from `piping_cost()` (needs conditional min/max bookkeeping
-  across "items actually routed onto a used rack" that isn't worth exact-
-  modeling for a secondary cost term) — `solve_cpsat()` still *returns* the
-  true complete `piping_cost()` after decoding, so `run()`'s existing
-  cross-check assert holds regardless of which solver ran. Keep-out zones
-  are approximated as their bounding box in the CP-SAT model (exact for
-  every zone this repo's data actually has — all rectangles — an
-  overestimate of the exclusion for a hypothetical concave zone); same
-  ceiling as `_rect_hits_poly`'s existing documented approximation, not a
-  new one. `ortools` added to `backend/requirements.txt` — the one
-  dependency addition this repo's ponytail rules explicitly anticipate,
-  since the roadmap item itself names OR-Tools as the tool.
-- [2026-07-17] `backend/api.py`'s mutating endpoints changed shape, done at
+  guaranteed to *contain* the real footprint. (2) CP-SAT's non-strict
+  `<=`/`>=` lets it place solutions exactly touching a boundary, which
+  float noise can then flip to a violation once decoded and re-checked by
+  `feasible()`'s strict `<` — fixed by padding every required-minimum
+  conversion (pairwise gap, rack half-width) with `CPSAT_EPS_M` (1cm)
+  before rounding; zero-margin checks (pull/wind — plain non-overlap, no
+  minimum distance) don't need this. The objective deliberately excludes
+  the rack-steel-span term from `piping_cost()` (not worth exact-modeling
+  for a secondary cost term) — `solve_cpsat()` still *returns* the true
+  complete `piping_cost()` after decoding, so `run()`'s cross-check assert
+  holds regardless of which solver ran. Keep-out zones are approximated as
+  their bounding box in the CP-SAT model (exact for every zone this repo's
+  data actually has — all rectangles). `ortools` added to
+  `backend/requirements.txt`.
+- [2026-07-17] `backend/api.py`'s mutating endpoints changed shape, at
   explicit user request for File > New/Open/Save/Save As/Export in the
   frontend (not a PLAN.md item). `POST /api/units/{name}/score|solve|
   export/*` (position-overlay-onto-a-named-unit) were replaced outright by
   `POST /api/score`, `/api/solve`, `/api/export/dxf`, `/api/export/takeoff`
   — all take the FULL case study inline in the request body (a `CaseData`
   pydantic model: equipment/connections/site/keepouts/spacing/name) instead
-  of a `{name}` path param + position overlay. `GET /api/units` and `GET
-  /api/units/{name}` are unchanged — still the only things that read
+  of a `{name}` path param + position overlay. `GET /api/units` and
+  `GET /api/units/{name}` are unchanged — still the only things that read
   `data/<name>/` CSVs, now used only to seed a project's *starting* state.
-  Reasoning: a project opened from (or saved to) a `.json` file in the
-  frontend never has to correspond to an on-disk unit — `_build_case()`
-  converts posted JSON into the same `(eq, conns, spacing, site, keepouts)`
-  tuple `load_unit()` produces, then every existing function
-  (`feasible()`/`piping_cost()`/`solve()`/`solve_cpsat()`/`write_dxf()`/
-  `write_takeoff()`) is called exactly as before — no solver changes.
-  `/api/solve`'s per-seed loop rebuilds fresh `Equipment` objects from the
-  posted spec each iteration (not by reloading CSVs, since there's no file)
-  — same reload-per-seed rule as `solve_ranked()`, for the same mutation
-  reason. Frontend's `src/lib/project.js` mirrors this shape
-  (`buildCaseData()`/`projectFileContents()`/`parseProjectFile()`) with its
-  own runnable check; `src/lib/raster.js` (PNG/JPG export, client-side SVG
-  rasterization) has no check — it's inherently DOM/Canvas-dependent,
-  verified manually in-browser instead. If a mutating endpoint's request
-  shape needs to change again, grep `CaseData` and `_build_case` first —
-  same "grep before assuming" caution as every other shape change logged
-  above.
+  A project opened from (or saved to) a `.json` file in the frontend never
+  has to correspond to an on-disk unit — `_build_case()` converts posted
+  JSON into the same `(eq, conns, spacing, site, keepouts)` tuple
+  `load_unit()` produces, then every existing function is called exactly
+  as before — no solver changes. `/api/solve`'s per-seed loop rebuilds
+  fresh `Equipment` objects from the posted spec each iteration (no CSVs
+  to reload). Frontend's `src/lib/project.js` mirrors this shape
+  (`buildCaseData()`/`projectFileContents()`/`parseProjectFile()`);
+  `src/lib/raster.js` (PNG/JPG export, client-side SVG rasterization) has
+  no automated check — inherently DOM/Canvas-dependent, verify manually
+  in-browser.
 - [2026-07-17] Pipe racks unified into `keepouts` as a `RACK*`-named zone
   (same mechanism ROAD*/MAINT* already used), at explicit user request so
   a rack could become a real rectangle drawable on the canvas instead of a
-  `(rack_y, rack_half)` band implicitly spanning the whole site width.
-  `Site.racks` is gone entirely — `Site` is just `w, d, wind_dir` now.
-  `_rack_zones(keepouts)` (grep this before assuming a call site still
-  takes a `racks` param) pulls out `RACK*` zones; their bounding box is
-  both the exclusion (for free, via the existing generic keepout-overlap
-  check — no rack-specific feasibility code needed anymore) and the
-  piping-routing target (`piping_cost()`/`solve_cpsat()`'s objective pick
-  whichever rack zone's y-center gives the shortest rise+drop, unchanged
-  reasoning from before). `piping_cost()`/`solve_cpsat()` raise a clear
-  error if a unit has connections but no `RACK*` zone — but only when
-  `conns` is non-empty, since a blank/equipment-less project (frontend's
-  File > New) must still score cleanly at cost 0 without one.
-  Two correctness traps hit during the refactor, worth knowing before
-  touching this again: (1) migrating sample_unit's two racks to zones
-  spanning the full site width at the same y-bands changed the CLI's best
-  score for seeds 0:8 from 394 to 386 — NOT a bug, confirmed via a 500k-case
-  fuzz test showing `feasible()`'s new keepout-based rack check is exactly
-  equivalent to the old formula for any footprint inside site bounds; the
-  score differs only because SA pushes equipment to the site's edge
-  (`site.d - e.d/2`), which for this unit's specific dimensions lands
-  exactly on a rack's edge too — old code's strict `<` let that
-  exact-touching case slide, the new shared keepout check (already
-  non-strict/inclusive, same as every other zone) correctly treats it as a
-  hit, and SA finds a different (here, better) path from there. (2) CP-SAT
-  needed `CPSAT_EPS_M` padding added to `kboxes` (previously zero-padded,
-  since a plain keepout's zero-margin non-strict check seemed consistent
-  with `_cpsat_no_overlap`'s gap=0) — measured via `test_cpsat.py` that
-  `_rect_hits_poly`'s ray-casting point-in-polygon test is ambiguous for a
-  query point exactly ON a zone edge/vertex, and the piping-cost objective
-  actively pulls solutions flush against a rack's edge (unlike most plain
-  keepouts, which nothing is attracted toward), reliably triggering that
-  ambiguity for racks specifically. Frontend: `PlotCanvas.jsx` gained a
-  rubber-band draw tool (`draw-road`/`draw-rack`, tool value convention
-  matches the `DRAW_PREFIX` map) — drag on the canvas background commits a
-  new `{PREFIX}_{n}` zone via `onAddZone`; click-to-select (only in the
-  `select` tool) + Delete/Backspace removes one via `onDeleteZone`. Both
-  live in `App.jsx`, mutating `data.keepouts` the same way drag/solve
-  mutate `positions` — no new persistence concept, Save/Save As already
-  serialize whatever's in `data`.
+  `(rack_y, rack_half)` band implicitly spanning the whole site width (see
+  the now-dead Item 8 entry above). `_rack_zones(keepouts)` pulls out
+  `RACK*` zones; their bounding box is both the exclusion (via the existing
+  generic keepout-overlap check — no rack-specific feasibility code
+  needed) and the piping-routing target (`piping_cost()`/`solve_cpsat()`'s
+  objective pick whichever rack zone's y-center gives the shortest
+  rise+drop). `piping_cost()`/`solve_cpsat()` raise a clear error if a unit
+  has connections but no `RACK*` zone — only when `conns` is non-empty,
+  since a blank/equipment-less project (frontend's File > New) must still
+  score cleanly at cost 0 without one.
+  Two correctness traps hit during the refactor: (1) migrating
+  sample_unit's two racks to zones spanning the full site width changed the
+  CLI's best score for seeds 0:8 from 394 to 386 — NOT a bug (confirmed via
+  a 500k-case fuzz test that the new keepout-based rack check is exactly
+  equivalent to the old formula for any footprint inside site bounds); the
+  score differs only because SA pushes equipment flush to the site edge,
+  which for this unit's dimensions lands exactly on a rack's edge — the
+  old strict `<` let that exact-touching case slide, the new shared
+  keepout check (non-strict/inclusive, like every other zone) correctly
+  treats it as a hit, and SA finds a different (better) path from there.
+  (2) CP-SAT needed `CPSAT_EPS_M` padding added to `kboxes` (previously
+  zero-padded) — `_rect_hits_poly`'s ray-casting point-in-polygon test is
+  ambiguous for a query point exactly ON a zone edge/vertex, and the
+  piping-cost objective actively pulls solutions flush against a rack's
+  edge (unlike most plain keepouts), reliably triggering that ambiguity
+  for racks specifically.
+- [2026-07-18] Frontend zone-drawing/rendering overhaul, all in
+  PlotCanvas.jsx/App.jsx/App.css, no backend changes (the OLD rubber-band
+  drag-to-add-zone description from the 07-17 entry above is superseded by
+  this). (1) Added a Normal/Wireframe/DXF view mode (`viewMode` prop, pure
+  rendering switch — DXF view shows every zone's true separate/unrounded
+  shape with its real name, previewing the actual export; gates every
+  merge/rounding feature below). (2) Zone drawing switched from two clicks
+  to one press-drag-release gesture with a tap shortcut
+  (`DRAW_TAP_THRESHOLD_M`); `DRAW_KINDS[kind].shape` (`'centerline'` vs
+  `'rect'`) branches the interaction — extend that map, don't add a third
+  special-cased drawing path. (3) Roads that overlap/touch merge into one
+  rounded shape (`clusterRoadZones` — any orientation merges) via a shared
+  `clusterZones(entries, shouldMerge)` union-find helper, `unionRoadOutline`
+  (grid-trace boundary of a rect cluster) + `withCornerFills` (adds a ghost
+  corner-square rect for any overlapping perpendicular pair — two
+  roads/racks drawn as centerline+width only reach each other's
+  *centerline*, not the far edge, so without this the union comes out
+  notched instead of a clean corner) + `roundedPolygonPath` (fillets only
+  the corners the merge actually created, not original dead-end corners —
+  see `junctionCornerFlags` — and only the outer swing of a real bend, not
+  every convex corner, via `outerSwingFlags`; the inner notch rounds tight
+  at `ROAD_INNER_RADIUS_M`, the outer swing rounds wide at that plus the
+  narrowest road width in the cluster). (4) Pipe racks reuse the same
+  `clusterZones`/`withCornerFills`/`unionRoadOutline` trio but with a
+  DIFFERENT merge predicate (`clusterRackZones` — only perpendicular/
+  crossing pairs merge; same-orientation overlaps stay separate, distinct
+  segments) and NO rounding (plain sharp-cornered polygon — racks are
+  structural corridors, not a vehicle path). (5) Rack width (7.5m) and a
+  new rack beam/cross-tie spacing (6m, `rackBeamSpacing` state, a "Beam
+  spacing (m)" field added to the same draw-rack width-prompt dialog) are
+  both adjustable; `rackHatchSegments(poly, spacing, excludeDRanges)`
+  derives its beam anchor from the polygon's own bounding box (left edge
+  if wider-than-tall, top/max-Y edge if taller-than-wide) — NOT draw order
+  — so spacing is deterministic for both a lone rack and a merged cluster;
+  the last regular beam snaps exactly to the far end if its gap would be
+  under `RACK_BEAM_END_MIN_GAP_M` (3m). On a crossing, each original rack
+  still draws its own beams along its own length, just none inside the
+  square where it actually crosses another rack (excluded via
+  `rackCrossDRange`) — and that square is framed on all 4 sides rather
+  than left empty, by re-adding a beam exactly at each exclusion range's
+  boundary (one rack contributes the left/right frame edges, the crossing
+  rack the top/bottom). All zone merging (road AND rack) is a pure
+  rendering overlay — `keepouts` entries are never combined or deleted; a
+  merged member renders invisible (`.merged-quiet`, CSS `pointer-events:
+  all` so it stays clickable) and shows its own true shape again once
+  selected.

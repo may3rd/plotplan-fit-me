@@ -311,9 +311,77 @@ def random_place(eq: list, site: Site, spacing: dict, rng, keepouts: dict = None
             return True
     return False
 
+def _move_feasible(e, eq, site, spacing, kboxes, wind_dir):
+    """Local feasibility check for one moved/rotated equipment e — same
+    rules as feasible() but only the checks that involve e: its own site
+    bounds, its footprint vs every keepout, its pairwise gap to every other
+    item, and its swept rectangles (pull/wind) vs site/keepouts/others. The
+    N² pairwise check and the N×K keepout check in feasible() each touch e
+    once per pair/zone, so checking only e's half is exact, not an
+    approximation — the un-touched items' mutual checks were already true
+    before the move and can't change by moving e. Returns True if e's new
+    position/size is feasible, else False (caller reverts)."""
+    if not (e.w / 2 <= e.x <= site.w - e.w / 2 and
+            e.d / 2 <= e.y <= site.d - e.d / 2):
+        return False
+    x1, y1, x2, y2 = _footprint(e)
+    for box in kboxes:
+        if _rect_overlap(x1, y1, x2, y2, *box):
+            return False
+    for o in eq:
+        if o is e:
+            continue
+        if edge_gap(e, o) < min_gap(e.cls, o.cls, spacing):
+            return False
+    # e's own pull clearance vs site/keepouts/others' footprints...
+    pr = _pull_rect(e)
+    if pr is not None:
+        px1, py1, px2, py2 = pr
+        if not (0 <= px1 and px2 <= site.w and 0 <= py1 and py2 <= site.d):
+            return False
+        for box in kboxes:
+            if _rect_overlap(px1, py1, px2, py2, *box):
+                return False
+        for o in eq:
+            if o is e:
+                continue
+            ox1, oy1, ox2, oy2 = _footprint(o)
+            if _rect_overlap(px1, py1, px2, py2, ox1, oy1, ox2, oy2):
+                return False
+    # ...and e's new footprint vs OTHER items' pull/wind rectangles —
+    # feasible() checks pull/wind from each item's own perspective, so
+    # moving e into another item's clearance violates that item's check
+    # without e itself having a clearance. Same logic, opposite direction.
+    for o in eq:
+        if o is e:
+            continue
+        opr = _pull_rect(o)
+        if opr is not None and _rect_overlap(x1, y1, x2, y2, *opr):
+            return False
+        if wind_dir and o.cls == "fired_heater":
+            owr = _wind_rect(o, wind_dir)
+            if owr is not None and _rect_overlap(x1, y1, x2, y2, *owr):
+                return False
+    # e's own wind rect (if e is a fired heater) vs others' footprints.
+    if wind_dir and e.cls == "fired_heater":
+        wr = _wind_rect(e, wind_dir)
+        if wr is not None:
+            wx1, wy1, wx2, wy2 = wr
+            for o in eq:
+                if o is e:
+                    continue
+                ox1, oy1, ox2, oy2 = _footprint(o)
+                if _rect_overlap(wx1, wy1, wx2, wy2, ox1, oy1, ox2, oy2):
+                    return False
+    return True
+
 def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
-          seed=0, iters=60000, t0=50.0, t1=0.05) -> float:
-    """Simulated annealing over feasible moves. Returns best cost."""
+          seed=0, iters=60000, t0=50.0, t1=0.05, on_progress=None) -> float:
+    """Simulated annealing over feasible moves. Returns best cost.
+    on_progress: optional callable(fraction in [0,1]) fired ~100 times
+    across the run — lets a UI show a real %-done bar instead of a spinner.
+    The fraction is k/iters (the loop always runs iters iterations unless
+    every item is pinned), so it's a faithful time estimate, not a guess."""
     # ponytail: SA + reject-infeasible. CP-SAT/MILP if this stalls on >30 items.
     spacing = DEFAULT_SPACING if spacing is None else spacing
     pinned = [e for e in eq if e.pinned]
@@ -323,10 +391,23 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
     rng = random.Random(seed)
     if not random_place(eq, site, spacing, rng, keepouts):
         raise RuntimeError("no feasible initial layout — site too small for spacing table")
+    # ponytail: precompute keepout bounding boxes (rect-rect overlap is a
+    # far cheaper reject than _rect_hits_poly's point-in-polygon, and exact
+    # for axis-aligned rect zones — this repo's only zone shape). _check()
+    # still runs the full polygon test after the solve, so a non-rect zone
+    # slipping through here would be caught; upgrade to per-edge half-planes
+    # only if a real unit ships a concave zone.
+    kboxes = [_bbox(poly) for poly in (keepouts or {}).values()]
+    wind_dir = site.wind_dir
     cost = piping_cost(eq, conns, site, keepouts)
     best = cost
     best_pos = [(e.x, e.y, e.w, e.d) for e in eq]
+    # ponytail: throttle on_progress to ~100 calls (every iters/100
+    # iterations) — firing all 60000 would itself become the bottleneck.
+    prog_step = max(1, iters // 100) if on_progress else 0
     for k in range(iters):
+        if prog_step and k % prog_step == 0:
+            on_progress(k / iters)
         if not movable:
             break  # everything pinned — nothing left to optimize
         t = t0 * (t1 / t0) ** (k / iters)
@@ -341,7 +422,13 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
             ox, oy = e.x, e.y
             e.x = min(max(e.x + rng.gauss(0, t / 4 + 0.5), e.w / 2), site.w - e.w / 2)
             e.y = min(max(e.y + rng.gauss(0, t / 4 + 0.5), e.d / 2), site.d - e.d / 2)
-        if not feasible(eq, site, spacing, keepouts):
+        # ponytail: local feasibility — only the checks involving e, since
+        # every other item's mutual checks were true before this single-item
+        # move and can't change. ~5x fewer rect-overlap tests per iteration
+        # than re-running the full N²/N×K feasible(), which the profile showed
+        # was 84% of solve time. Exact (not an approximation) for one moved
+        # item; _check() re-runs the full feasible() after the solve.
+        if not _move_feasible(e, eq, site, spacing, kboxes, wind_dir):
             if rotate:
                 e.w, e.d = e.d, e.w
             else:
@@ -358,6 +445,8 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
             e.x, e.y = ox, oy
     for e, (x, y, w, d) in zip(eq, best_pos):
         e.x, e.y, e.w, e.d = x, y, w, d
+    if on_progress:
+        on_progress(1.0)
     return best
 
 # ------------------------------------------------------ CP-SAT solver (item 11)
@@ -422,7 +511,8 @@ def _cpsat_no_overlap(model, a, b, gap_grid: int, name: str):
     model.AddBoolOr([left, right, below, above])
 
 def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
-                 seed: int = 0, time_limit_s: float = 20.0, grid_m: float = CPSAT_GRID_M) -> float:
+                 seed: int = 0, time_limit_s: float = 20.0, grid_m: float = CPSAT_GRID_M,
+                 on_progress=None) -> float:
     """CP-SAT layout solver — same feasibility rules as feasible()/_check()
     (site bounds, keep-out zones — pipe racks included, they're just a
     zone named RACK* — pairwise class spacing, tube-pull clearance,
@@ -586,9 +676,13 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
     solver.parameters.max_time_in_seconds = time_limit_s
     solver.parameters.num_search_workers = 8
     solver.parameters.random_seed = seed
+    if on_progress:
+        on_progress(0.0)  # ponytail: CP-SAT's internal search has no progress hook; just mark start/end
     status = solver.Solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         raise RuntimeError("CP-SAT found no feasible layout within the time limit")
+    if on_progress:
+        on_progress(1.0)
 
     for e in eq:
         if e.pinned:

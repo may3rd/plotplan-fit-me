@@ -11,12 +11,14 @@ temp file each export briefly uses to reuse write_dxf()/write_takeoff().
 
 Run: uvicorn api:app --reload --port 8000
 """
+import json
 import os
 import tempfile
 from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from plotplan import (
@@ -149,25 +151,71 @@ class SolveRequest(BaseModel):
 def solve_data(req: SolveRequest):
     """Same ranking loop as plotplan.solve_ranked(), but building each
     seed's Equipment list fresh from the posted CaseData instead of
-    reloading CSVs from disk."""
-    results = []
-    best = None  # (cost, eq)
-    for seed in req.seeds:
-        eq, conns, spacing, site, keepouts = _build_case(req.data)
-        movable = sum(1 for e in eq if not e.pinned)
-        if movable > CPSAT_THRESHOLD:
-            cost = solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed)
-        else:
-            cost = solve(eq, conns, site, spacing, keepouts, seed=seed)
-        results.append((seed, cost))
-        if best is None or cost < best[0]:
-            best = (cost, eq)
-    results.sort(key=lambda r: r[1])
-    return {
-        "results": [{"seed": s, "cost": c} for s, c in results],
-        "cost": best[0],
-        "equipment": [asdict(e) for e in best[1]],
-    }
+    reloading CSVs from disk. Streams `progress` SSE events (one per
+    seed-start and ~100 per SA solve iteration batch) so the frontend
+    can show a real %-done bar, then a final `done` event with the result.
+    ponytail: a background thread runs the blocking solver while the
+    request thread yields SSE chunks from a queue — FastAPI's
+    StreamingResponse drives the SSE wire format, the thread + queue
+    bridge the sync solver to the async stream. No async rewrite of
+    plotplan.py needed.
+    """
+    import queue as _q
+    import threading
+
+    q: _q.Queue = _q.Queue()
+
+    def emit(kind, payload=None):
+        q.put({"event": kind, "data": json.dumps(payload) if payload is not None else ""})
+
+    def worker():
+        try:
+            n = len(req.seeds)
+            results = []
+            best = None  # (cost, eq)
+            for i, seed in enumerate(req.seeds):
+                emit("progress", {"fraction": i / n, "seed": seed, "seed_index": i, "seed_count": n})
+                eq, conns, spacing, site, keepouts = _build_case(req.data)
+                movable = sum(1 for e in eq if not e.pinned)
+
+                # ponytail: SA fires on_progress 100 times across its
+                # iters; map each seed's internal fraction into the whole
+                # solve's [i/n, (i+1)/n] slice so the bar advances
+                # smoothly within a seed too, not just per seed. CP-SAT
+                # only fires 0 and 1 (its search has no progress hook).
+                def on_progress(frac, _i=i, _n=n):
+                    emit("progress", {"fraction": (_i + frac) / _n, "seed": seed,
+                                      "seed_index": _i, "seed_count": _n})
+
+                if movable > CPSAT_THRESHOLD:
+                    cost = solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress)
+                else:
+                    cost = solve(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress)
+                results.append((seed, cost))
+                if best is None or cost < best[0]:
+                    best = (cost, eq)
+            results.sort(key=lambda r: r[1])
+            emit("done", {
+                "results": [{"seed": s, "cost": c} for s, c in results],
+                "cost": best[0],
+                "equipment": [asdict(e) for e in best[1]],
+            })
+        except Exception as e:  # ponytail: surface solver errors to the UI instead of a hung stream
+            emit("error", {"message": str(e)})
+        finally:
+            q.put(None)  # sentinel: stream ends here
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def stream():
+        while True:
+            msg = q.get()
+            if msg is None:
+                break
+            yield f"event: {msg['event']}\ndata: {msg['data']}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/export/dxf")
