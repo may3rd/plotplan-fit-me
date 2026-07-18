@@ -73,6 +73,14 @@ RACK_STEEL_COST_PER_M = 1.0
 # DEFAULT_SPACING); tune against a real wind-risk study if one exists.
 WIND_CLEARANCE_M = 20.0
 
+# ponytail: road curb-radius knobs, mirroring the frontend
+# (ROAD_INNER_RADIUS_M / outer = inner + road width). DXF has no arc entity in
+# the minimal writer below, so a rounded corner is approximated as this many
+# short LINE segments along the quadratic bezier the frontend draws — bump up
+# if a real export ever looks too faceted.
+ROAD_INNER_RADIUS_M = 8.0
+ROAD_FILLET_SEGMENTS = 8
+
 # connection: (tag_a, tag_b, weight). weight ~ n_lines * size factor,
 # i.e. relative installed-piping cost per meter of route.
 Connection = tuple
@@ -615,6 +623,228 @@ def _zone_layer(zone: str) -> str:
         return "MAINT"
     return "KEEPOUT"
 
+# ------------------------------------------------------------- zone merging
+# ponytail: port of the frontend's merge+trace logic (PlotCanvas.jsx
+# clusterZones/withCornerFills/unionRoadOutline/convexCornerFlags/
+# outerSwingFlags/roundedPolygonPath) so the DXF export traces the true
+# merged corridor area for roads and pipe racks instead of drawing each
+# zone's own rectangle with a visible seam at every join. MAINT/KEEPOUT
+# are area zones with no corridor semantics — they keep the per-polygon
+# trace. Stdlib only, same shape as the existing _point_in_poly/_bbox.
+
+def _zone_bbox(poly):
+    x1, y1, x2, y2 = _bbox(poly)
+    return {"minX": x1, "minY": y1, "maxX": x2, "maxY": y2}
+
+def _bboxes_overlap(a, b, eps=0.05):
+    return (a["minX"] <= b["maxX"] + eps and a["maxX"] >= b["minX"] - eps
+            and a["minY"] <= b["maxY"] + eps and a["maxY"] >= b["minY"] - eps)
+
+def _is_vertical(b):
+    return (b["maxX"] - b["minX"]) <= (b["maxY"] - b["minY"])
+
+def _cluster_zones(entries, should_merge):
+    """Union-find clustering of [{zone, poly, bbox}] by a pairwise
+    should_merge(a, b) predicate; transitively chains A-B-C into one
+    cluster. Returns a list of clusters (each a list of entries)."""
+    n = len(entries)
+    parent = list(range(n))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for i in range(n):
+        for j in range(i + 1, n):
+            if should_merge(entries[i]["bbox"], entries[j]["bbox"]):
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+    groups = {}
+    for i, e in enumerate(entries):
+        groups.setdefault(find(i), []).append(e)
+    return list(groups.values())
+
+def _with_corner_fills(rects):
+    """For every overlapping perpendicular pair, add the corner square
+    (vertical road's x-range × horizontal road's y-range) so a two-click
+    L/T/+ join traces as one outline instead of a stair-step notch."""
+    out = list(rects)
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            a, b = rects[i], rects[j]
+            av, bv = _is_vertical(a), _is_vertical(b)
+            if av == bv:
+                continue
+            if not (a["minX"] < b["maxX"] and b["minX"] < a["maxX"]
+                    and a["minY"] < b["maxY"] and b["minY"] < a["maxY"]):
+                continue
+            v, h = (a, b) if av else (b, a)
+            out.append({"minX": v["minX"], "maxX": v["maxX"],
+                        "minY": h["minY"], "maxY": h["maxY"]})
+    return out
+
+def _union_outline(rects):
+    """Union axis-aligned rects into one rectilinear outline via a grid
+    trace: build the coordinate grid, mark filled cells, collect each
+    filled cell's edges that border the outside, link them tip-to-tail
+    into a closed loop, drop collinear points. Assumes a simply-connected
+    union (true for how roads/racks get drawn here). Returns [] if empty."""
+    if not rects:
+        return []
+    xs = sorted({r["minX"] for r in rects} | {r["maxX"] for r in rects})
+    ys = sorted({r["minY"] for r in rects} | {r["maxY"] for r in rects})
+    nx, ny = len(xs) - 1, len(ys) - 1
+    if nx <= 0 or ny <= 0:
+        return []
+    filled = [[any(xs[ix] < r["maxX"] and xs[ix + 1] > r["minX"]
+                   and ys[iy] < r["maxY"] and ys[iy + 1] > r["minY"]
+                   for r in rects)
+               for ix in range(nx)] for iy in range(ny)]
+    edges = []
+    for iy in range(ny):
+        for ix in range(nx):
+            if not filled[iy][ix]:
+                continue
+            x0, x1, y0, y1 = xs[ix], xs[ix + 1], ys[iy], ys[iy + 1]
+            if ix == 0 or not filled[iy][ix - 1]:
+                edges.append(((x0, y0), (x0, y1)))
+            if ix == nx - 1 or not filled[iy][ix + 1]:
+                edges.append(((x1, y1), (x1, y0)))
+            if iy == 0 or not filled[iy - 1][ix]:
+                edges.append(((x1, y0), (x0, y0)))
+            if iy == ny - 1 or not filled[iy + 1][ix]:
+                edges.append(((x0, y1), (x1, y1)))
+    if not edges:
+        return []
+    key = lambda p: f"{p[0]:.4f},{p[1]:.4f}"
+    by_start = {key(e[0]): i for i, e in enumerate(edges)}
+    used = [False] * len(edges)
+    loop = []
+    cur = 0
+    for _ in range(len(edges)):
+        used[cur] = True
+        loop.append(edges[cur][0])
+        nxt = by_start.get(key(edges[cur][1]))
+        if nxt is None or used[nxt]:
+            break
+        cur = nxt
+    n = len(loop)
+    return [p for i, p in enumerate(loop)
+            if not ((loop[(i - 1) % n][0] == p[0] == loop[(i + 1) % n][0])
+                    or (loop[(i - 1) % n][1] == p[1] == loop[(i + 1) % n][1]))]
+
+def _convex_corner_flags(outline):
+    """True at corners that turn outward (outer curb of a bend); False at
+    the inner notch. winding sign comes from signed area, then a corner's
+    turn cross-product sign tells convex vs concave."""
+    n = len(outline)
+    if n < 3:
+        return [False] * n
+    area2 = 0.0
+    for i in range(n):
+        ax, ay = outline[i]
+        bx, by = outline[(i + 1) % n]
+        area2 += ax * by - bx * ay
+    ccw = area2 > 0
+    flags = []
+    for i in range(n):
+        a = outline[(i - 1) % n]
+        p = outline[i]
+        c = outline[(i + 1) % n]
+        cross = (p[0] - a[0]) * (c[1] - p[1]) - (p[1] - a[1]) * (c[0] - p[0])
+        flags.append(cross > 0 if ccw else cross < 0)
+    return flags
+
+def _outer_swing_flags(outline, convex, widths, eps=0.01):
+    """Among convex corners, flag the outer curb-swing of a real bend
+    (rounds wide) vs a dead-end cap (stays sharp). A bend's outer swing
+    sits one road-width away on each axis from its paired concave notch."""
+    notches = [outline[i] for i in range(len(outline)) if not convex[i]]
+    is_width = lambda d: any(abs(d - w) < eps for w in widths)
+    return [convex[i] and any(
+        is_width(abs(outline[i][0] - q[0])) and is_width(abs(outline[i][1] - q[1]))
+        for q in notches) for i in range(len(outline))]
+
+def _rounded_polyline_segments(outline, radii, segments=ROAD_FILLET_SEGMENTS):
+    """LINE segments tracing the outline with the flagged corners
+    filleted: a straight edge from the previous corner's out-point to this
+    corner's in-point, then a quadratic-bezier curve through the true
+    corner point to this corner's out-point. Each edge is claimed only by
+    the fillets at its own two endpoints (full edge if the far end is
+    sharp, half if both round) so two curves can't overlap. A zero radius
+    leaves that corner sharp (in-point == out-point == corner). Returns
+    [(x1,y1,x2,y2), ...] tracing one closed loop."""
+    n = len(outline)
+    if n < 3:
+        return []
+    corners = []
+    for i in range(n):
+        prev = outline[(i - 1) % n]
+        p = outline[i]
+        nxt = outline[(i + 1) % n]
+        ein = math.hypot(p[0] - prev[0], p[1] - prev[1])
+        eout = math.hypot(nxt[0] - p[0], nxt[1] - p[1])
+        in_share = ein / 2 if radii[(i - 1) % n] > 1e-9 else ein
+        out_share = eout / 2 if radii[(i + 1) % n] > 1e-9 else eout
+        r = min(radii[i], in_share, out_share) if radii[i] > 1e-9 else 0.0
+        to_prev = ([(prev[0] - p[0]) / ein, (prev[1] - p[1]) / ein] if ein > 1e-6 else [0.0, 0.0])
+        to_next = ([(nxt[0] - p[0]) / eout, (nxt[1] - p[1]) / eout] if eout > 1e-6 else [0.0, 0.0])
+        corners.append({
+            "in": (p[0] + to_prev[0] * r, p[1] + to_prev[1] * r),
+            "corner": p,
+            "out": (p[0] + to_next[0] * r, p[1] + to_next[1] * r),
+            "rounded": r > 1e-6,
+        })
+    segs = []
+    for i in range(n):
+        prev_out = corners[(i - 1) % n]["out"]
+        c = corners[i]
+        start = c["in"] if c["rounded"] else c["corner"]
+        # straight edge from the previous corner's out-point to this
+        # corner's in-point (collapses to zero length when both ends are
+        # the same sharp corner, which the DXF writer just drops visually)
+        if math.hypot(start[0] - prev_out[0], start[1] - prev_out[1]) > 1e-9:
+            segs.append((prev_out[0], prev_out[1], start[0], start[1]))
+        if c["rounded"]:
+            # quadratic bezier P(t) = (1-t)^2 start + 2(1-t)t corner + t^2 out
+            prev_pt = start
+            for k in range(1, segments + 1):
+                t = k / segments
+                u = 1 - t
+                bx = u * u * start[0] + 2 * u * t * c["corner"][0] + t * t * c["out"][0]
+                by = u * u * start[1] + 2 * u * t * c["corner"][1] + t * t * c["out"][1]
+                segs.append((prev_pt[0], prev_pt[1], bx, by))
+                prev_pt = (bx, by)
+    return segs
+
+def _merged_zone_segments(zones, round_corners):
+    """Trace a merged corridor (roads or crossing racks) as LINE segments.
+    `zones` is a list of (zone, poly) pairs already grouped into one
+    cluster. `round_corners` picks road curb-radius (True) vs rack sharp
+    (False). Returns (segs, label_point) where label_point is the outline
+    centroid for the zone label text."""
+    rects = [_zone_bbox(poly) for _, poly in zones]
+    outline = _union_outline(_with_corner_fills(rects))
+    if len(outline) < 3:
+        return [], None
+    cx = sum(p[0] for p in outline) / len(outline)
+    cy = sum(p[1] for p in outline) / len(outline)
+    if not round_corners:
+        segs = []
+        n = len(outline)
+        for i in range(n):
+            segs.append((outline[i][0], outline[i][1],
+                         outline[(i + 1) % n][0], outline[(i + 1) % n][1]))
+        return segs, (cx, cy)
+    convex = _convex_corner_flags(outline)
+    widths = [min(r["maxX"] - r["minX"], r["maxY"] - r["minY"]) for r in rects]
+    outer = ROAD_INNER_RADIUS_M + min(widths) if widths else ROAD_INNER_RADIUS_M
+    swing = _outer_swing_flags(outline, convex, widths)
+    radii = [outer if (convex[i] and swing[i]) else (ROAD_INNER_RADIUS_M if not convex[i] else 0.0)
+             for i in range(len(outline))]
+    return _rounded_polyline_segments(outline, radii), (cx, cy)
+
 def write_dxf(path: str, eq: list, site: Site, keepouts: dict = None):
     with open(path, "w") as f:
         f.write("0\nSECTION\n2\nENTITIES\n")
@@ -622,8 +852,41 @@ def write_dxf(path: str, eq: list, site: Site, keepouts: dict = None):
         for (x1, y1), (x2, y2) in [((0, 0), (site.w, 0)), ((site.w, 0), (site.w, site.d)),
                                    ((site.w, site.d), (0, site.d)), ((0, site.d), (0, 0))]:
             _line(f, x1, y1, x2, y2, "SITE")
-        # keep-out / road / pipe-rack / maintenance zones
-        for zone, poly in (keepouts or {}).items():
+        # keep-out / road / pipe-rack / maintenance zones. Roads and pipe
+        # racks are corridors — overlapping roads (any orientation) and
+        # crossing racks (one horizontal, one vertical) merge into one
+        # traced outline so the join reads as a single continuous corridor
+        # instead of two rectangles with a seam. MAINT/KEEPOUT are area
+        # zones with no corridor semantics; each keeps its own polygon.
+        kk = keepouts or {}
+        road_entries = [{"zone": z, "poly": p, "bbox": _zone_bbox(p)}
+                        for z, p in kk.items() if z.upper().startswith("ROAD")]
+        rack_entries = [{"zone": z, "poly": p, "bbox": _zone_bbox(p)}
+                        for z, p in kk.items() if z.upper().startswith("RACK")]
+        merged_names = set()  # zones subsumed by a merged outline (skip per-poly)
+        for cluster in _cluster_zones(road_entries, _bboxes_overlap):
+            if len(cluster) < 2:
+                continue
+            segs, label = _merged_zone_segments([(e["zone"], e["poly"]) for e in cluster], True)
+            for x1, y1, x2, y2 in segs:
+                _line(f, x1, y1, x2, y2, "ROADS")
+            if label is not None:
+                _text(f, label[0], label[1] + 0.4, 1.0, "ROAD", "ROADS")
+            merged_names.update(e["zone"] for e in cluster)
+        for cluster in _cluster_zones(
+                rack_entries,
+                lambda a, b: _bboxes_overlap(a, b) and _is_vertical(a) != _is_vertical(b)):
+            if len(cluster) < 2:
+                continue
+            segs, label = _merged_zone_segments([(e["zone"], e["poly"]) for e in cluster], False)
+            for x1, y1, x2, y2 in segs:
+                _line(f, x1, y1, x2, y2, "RACK")
+            if label is not None:
+                _text(f, label[0], label[1] + 0.4, 1.0, "RACK", "RACK")
+            merged_names.update(e["zone"] for e in cluster)
+        for zone, poly in kk.items():
+            if zone in merged_names:
+                continue
             layer = _zone_layer(zone)
             n = len(poly)
             for i in range(n):

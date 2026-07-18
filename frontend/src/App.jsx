@@ -5,7 +5,7 @@ import Ribbon from '@/components/Ribbon'
 import StatusBar from '@/components/StatusBar'
 import { buildCaseData, BLANK_PROJECT, parseProjectFile, projectFileContents } from '@/lib/project'
 import { downloadRaster } from '@/lib/raster'
-import { fitView, zoomAt, zoomPercent } from '@/lib/view'
+import { fitView, reaspect, zoomAt, zoomPercent } from '@/lib/view'
 import './App.css'
 
 function App() {
@@ -71,8 +71,11 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unitName])
 
-  // fit once per loaded unit; on later resizes just re-fit aspect via a full
-  // fitView (cheap, and re-fitting on resize is the least-surprising default).
+  // fit once per loaded unit; on later resizes re-fit the viewBox aspect to
+  // the new canvas aspect so the world→screen mapping stays undistorted
+  // (preserveAspectRatio="none" would otherwise stretch the plot when the
+  // window narrows/widens). Keeps the same center and width (i.e. the user's
+  // zoom level), only height tracks the new aspect — see reaspect().
   useEffect(() => {
     if (!data || !csize?.width) return
     if (fittedFor.current !== data) {
@@ -80,7 +83,10 @@ function App() {
       setView(fv)
       fitW.current = fv.w
       fittedFor.current = data
+    } else if (view) {
+      setView(reaspect(view, csize))
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, csize])
 
   const scoreLayout = useCallback((pos) => {

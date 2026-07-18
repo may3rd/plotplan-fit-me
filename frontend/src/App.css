@@ -2,15 +2,20 @@
 
 .app-shell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr); /* ponytail: one column that can shrink below its content's max-width — without this the grid's implicit column is max-content and the ribbon's intrinsic width (w-48 selects + fixed groups) pins the whole shell at ~1400px, so resizing the window smaller overflows the right edge instead of reflowing. */
   grid-template-rows: auto 1fr auto;
+  width: 100%;
   height: 100vh;
+  min-width: 0;
   overflow: hidden;
   background: var(--app-backdrop);
 }
 
 .canvas-area {
+  min-width: 0; /* let the grid row actually constrain the canvas */
   min-height: 0; /* let the grid row actually constrain the canvas */
   background: #eceef1;
+  overflow: hidden;
 }
 
 /* ---- ribbon + menu bar (Word-style: floating rounded card) --------------- */
@@ -100,6 +105,8 @@
   padding: 0.4rem 0.75rem;
   height: 5.625rem; /* fixed so switching Home/View tabs never resizes the ribbon */
   background: transparent;
+  min-width: 0;
+  overflow-x: auto; /* ponytail: when the window is narrower than the group sum, scroll the ribbon instead of overflowing the right edge. */
 }
 
 .ribbon-group {
@@ -146,9 +153,12 @@
 
 .canvas-grid {
   display: grid;
-  grid-template-columns: 26px 1fr;
-  grid-template-rows: 26px 1fr;
+  grid-template-columns: 26px minmax(0, 1fr); /* minmax(0,1fr) so the canvas column can shrink below its content's max-width — plain 1fr is max-content-min, which never shrinks. */
+  grid-template-rows: 26px minmax(0, 1fr);
+  width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
 }
 
 .canvas-grid[data-ruler='off'] {
