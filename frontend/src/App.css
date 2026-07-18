@@ -552,6 +552,11 @@
   stroke-width: 2.5;
 }
 
+.equip.selected {
+  stroke: #2563eb;
+  stroke-width: 2.5;
+}
+
 .tag {
   font-size: 1.6px;
   text-anchor: middle;

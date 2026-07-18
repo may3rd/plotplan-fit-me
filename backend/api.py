@@ -228,8 +228,8 @@ def solve_data(req: SolveRequest, request: Request):
 
                 def on_improve(cost, positions, k, _seed=seed, _i=i):
                     emit("improve", {"seed": _seed, "seed_index": _i, "iteration": k, "cost": cost,
-                                     "equipment": [{"tag": t, "x": x, "y": y, "w": w, "d": d}
-                                                   for t, x, y, w, d in positions]})
+                                     "equipment": [{"tag": t, "x": x, "y": y, "w": w, "d": d, "pull_side": p}
+                                                   for t, x, y, w, d, p in positions]})
 
                 cost = solve_one(eq, conns, site, spacing, keepouts, seed=seed,
                                  on_improve=on_improve, should_stop=stop_event.is_set)

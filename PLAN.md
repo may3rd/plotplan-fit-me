@@ -396,6 +396,16 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
   reject-infeasible + item 13 still stalls on very tight sites. Keep
   reject-infeasible as default: it is simpler and every intermediate
   layout stays presentable, which item 16/17 depend on.
+- **Real-time move (item 16-17) UX needs improvement** — flagged 2026-07-18
+  after the mechanism itself was verified working end-to-end (backend
+  `/api/relax`, push_repair, and the frontend throttle/toggle all confirmed
+  live). Specifics of what to improve not yet captured — ask before
+  picking this up.
+- ~~Solver-rotated equipment's `pull_side` staying stale~~ — done
+  2026-07-18, see CLAUDE.md self-learning. Also fixed in passing: the
+  frontend never applied a solve/relax response's `w`/`d`/`pull_side` back
+  onto `data.equipment` at all (only `x`/`y`), so a rotated result would
+  have silently rendered with the pre-solve shape.
 
 ## Non-goals (explicit, don't creep in)
 

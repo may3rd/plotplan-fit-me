@@ -3,6 +3,7 @@ import { Loader2 } from 'lucide-react'
 import PlotCanvas from '@/components/PlotCanvas'
 import Ribbon from '@/components/Ribbon'
 import StatusBar from '@/components/StatusBar'
+import { rotateSide } from '@/lib/geom'
 import { buildCaseData, BLANK_PROJECT, parseProjectFile, projectFileContents } from '@/lib/project'
 import { downloadRaster } from '@/lib/raster'
 import { fitView, reaspect, zoomAt, zoomPercent } from '@/lib/view'
@@ -40,6 +41,7 @@ function App() {
   const [editPromptNonce, setEditPromptNonce] = useState(0) // bump to open the selected zone's edit dialog
   const bumpEditPrompt = useCallback(() => setEditPromptNonce((n) => n + 1), [])
   const [selectedZone, setSelectedZone] = useState(null) // currently selected keep-out/road/rack zone
+  const [selectedEquip, setSelectedEquip] = useState(null) // currently selected equipment tag
   const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
   const fittedFor = useRef(null)
 
@@ -55,6 +57,7 @@ function App() {
     setPositions(pos)
     setScore(null)
     setResults(null)
+    setSelectedEquip(null)
   }, [])
 
   // Tools > Customize UI theme picker: 'dark'/'light' force the .dark class
@@ -129,6 +132,27 @@ function App() {
     scoreLayout(next)
   }, [scoreLayout])
 
+  // Merge solver-driven shape changes (w/d/pull_side — the SA rotate move
+  // and CP-SAT's ROT var can both flip an item's orientation while
+  // searching for the best layout) back into data.equipment. x/y stay in
+  // `positions`, not here — same "shape" (data.equipment) vs. "where"
+  // (positions) split the rest of the app already uses. Response equipment
+  // lists (POST /api/solve's `done` event, POST /api/relax) are full
+  // Equipment dataclasses (asdict()), so every tag here always has w/d/
+  // pull_side present.
+  const applyRotations = useCallback((resEquipment) => {
+    setData((d) => {
+      const byTag = Object.fromEntries(resEquipment.map((e) => [e.tag, e]))
+      return {
+        ...d,
+        equipment: d.equipment.map((e) => {
+          const r = byTag[e.tag]
+          return r ? { ...e, w: r.w, d: r.d, pull_side: r.pull_side } : e
+        }),
+      }
+    })
+  }, [])
+
   // --- Mode 2: real-time layouting (PLAN.md items 16-17, POST /api/relax) ---
   // Toggled from the Home ribbon. While on, dragging an item also throttle-
   // calls /relax, which pins the dragged item at the cursor and reflows
@@ -167,10 +191,11 @@ function App() {
         const pos = {}
         for (const e of res.equipment) pos[e.tag] = { x: e.x, y: e.y }
         setPositions(pos)
+        applyRotations(res.equipment)
         setScore({ feasible: true, cost: res.cost })
       })
       .catch(() => {}) // ponytail: a dropped relax frame just means the next drag frame (or the on-drop flush) tries again
-  }, [data, positions])
+  }, [data, positions, applyRotations])
 
   // ~100ms throttle: fires immediately if it's been >=100ms since the last
   // call, otherwise schedules one trailing call for whenever that window
@@ -237,6 +262,27 @@ function App() {
     deleteZone(name)
     setSelectedZone(null)
   }, [deleteZone])
+
+  // Ribbon's Rotate buttons: rotate the selected equipment's footprint (and
+  // its pull_side, if any) 90/180/270 clockwise. Only w/d/pull_side change —
+  // x/y (in `positions`, not `data`) are untouched since rotating about an
+  // item's own center doesn't move it. Changing `data` here re-triggers the
+  // scoreLayout effect below, same as addZone/editZone.
+  const rotateEquipment = useCallback((tag, deg) => {
+    setData((d) => ({
+      ...d,
+      equipment: d.equipment.map((e) => {
+        if (e.tag !== tag) return e
+        const swapped = deg % 180 !== 0
+        return {
+          ...e,
+          w: swapped ? e.d : e.w,
+          d: swapped ? e.w : e.d,
+          pull_side: rotateSide(e.pull_side, deg),
+        }
+      }),
+    }))
+  }, [])
 
   const zoomCenter = useCallback((factor) => {
     if (!csize?.width) return
@@ -312,6 +358,7 @@ function App() {
       const pos = {}
       for (const e of result.equipment) pos[e.tag] = { x: e.x, y: e.y }
       setPositions(pos)
+      applyRotations(result.equipment)
       setScore({ feasible: true, cost: result.cost })
       setResults(result.results)
     } finally {
@@ -414,6 +461,7 @@ function App() {
         viewMode={viewMode} setViewMode={setViewMode}
         tool={tool} setTool={setTool} bumpDrawPrompt={bumpDrawPrompt} fit={fit}
         bumpEditPrompt={bumpEditPrompt} selectedZone={selectedZone} deleteZone={deleteSelectedZone}
+        selectedEquip={selectedEquip} rotateEquipment={rotateEquipment}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
         newProject={newProject} openProject={openProject}
         saveProject={saveProject} saveProjectAs={saveProjectAs}
@@ -452,6 +500,7 @@ function App() {
           onCursor={setCursor} onSize={setCsize}
           onAddZone={addZone} onDeleteZone={deleteZone} onEditZone={editZone}
           selectedZone={selectedZone} setSelectedZone={setSelectedZone}
+          selectedEquip={selectedEquip} setSelectedEquip={setSelectedEquip}
         />
       </main>
 

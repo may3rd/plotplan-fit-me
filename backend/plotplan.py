@@ -209,6 +209,17 @@ def _side_rect(x1, y1, x2, y2, side: str, length: float):
         "y-": (x1, y1 - length, x2, y1),
     }.get(side)
 
+# Rotating a footprint 90deg clockwise cycles a side the same way a compass
+# needle would: x+ -> y- -> x- -> y+ -> x+. `pull_side` names a face of the
+# EQUIPMENT (e.g. "the tube bundle pulls out this end"), not a fixed compass
+# direction, so it must rotate along with w/d whenever something rotates the
+# item — solve()'s SA rotate move and solve_cpsat()'s ROT variable both use
+# this (mirrors frontend/src/lib/geom.js's rotateSide(), one 90 deg step).
+_ROTATE_CW = {"x+": "y-", "y-": "x-", "x-": "y+", "y+": "x+"}
+
+def _rotate_side_cw(side: str) -> str:
+    return _ROTATE_CW.get(side, side)
+
 def _pull_rect(e: Equipment):
     """Tube-pull / maintenance clearance rectangle attached to one side of
     the footprint, or None if the item has no pull clearance defined."""
@@ -383,8 +394,11 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
     on_improve: optional callable(best_cost, positions, k) fired every time
     SA accepts a new best (not throttled — an "anytime" stream of every
     real improvement, not a periodic heartbeat). positions is a snapshot
-    list of (tag, x, y, w, d) tuples, safe to hold onto after the call —
-    eq itself keeps mutating every iteration, so the live objects aren't.
+    list of (tag, x, y, w, d, pull_side) tuples, safe to hold onto after the
+    call — eq itself keeps mutating every iteration, so the live objects
+    aren't. pull_side is included because the rotate move rotates it along
+    with w/d (see _rotate_side_cw) — a stale pull_side would point a
+    rotated item's tube-pull clearance the wrong way relative to its body.
     should_stop: optional callable() -> bool, checked every iteration; a
     truthy return breaks the loop early. Whatever iteration it stops at,
     eq is written back to best_pos before returning (see below), which is
@@ -418,7 +432,7 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
     wind_dir = site.wind_dir
     cost = piping_cost(eq, conns, site, keepouts)
     best = cost
-    best_pos = [(e.x, e.y, e.w, e.d) for e in eq]
+    best_pos = [(e.x, e.y, e.w, e.d, e.pull_side) for e in eq]
     for k in range(iters):
         if should_stop and should_stop():
             break
@@ -445,9 +459,12 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
         elif r < 0.8:
             e = rng.choice(movable)
             e.w, e.d = e.d, e.w
+            old_pull_side = e.pull_side
+            e.pull_side = _rotate_side_cw(e.pull_side)
             touched = (e,)
-            def undo(e=e):
+            def undo(e=e, old_pull_side=old_pull_side):
                 e.w, e.d = e.d, e.w
+                e.pull_side = old_pull_side
         elif r < 0.9:
             if len(movable) < 2:
                 continue
@@ -481,13 +498,13 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
         if new < cost or rng.random() < math.exp((cost - new) / t):
             cost = new
             if cost < best:
-                best, best_pos = cost, [(q.x, q.y, q.w, q.d) for q in eq]
+                best, best_pos = cost, [(q.x, q.y, q.w, q.d, q.pull_side) for q in eq]
                 if on_improve:
-                    on_improve(best, [(q.tag, q.x, q.y, q.w, q.d) for q in eq], k)
+                    on_improve(best, [(q.tag, q.x, q.y, q.w, q.d, q.pull_side) for q in eq], k)
         else:
             undo()
-    for e, (x, y, w, d) in zip(eq, best_pos):
-        e.x, e.y, e.w, e.d = x, y, w, d
+    for e, (x, y, w, d, pull_side) in zip(eq, best_pos):
+        e.x, e.y, e.w, e.d, e.pull_side = x, y, w, d, pull_side
     return best
 
 # ------------------------------------------------------ CP-SAT solver (item 11)
@@ -537,23 +554,29 @@ def _g_floor(meters: float, grid_m: float) -> int:
 # exactly on its boundary.
 CPSAT_EPS_M = 0.01
 
-def _cpsat_no_overlap(model, a, b, gap_grid: int, name: str):
+def _cpsat_no_overlap(model, a, b, gap_grid: int, name: str, enforce_if=None):
     """a, b: (left, bottom, right, top) linear expressions/ints. Require the
     two rectangles separated by >= gap_grid in x or y (reified 4-way
     disjunction) — the axis-aligned approximation of edge_gap(), stronger
     than the exact Euclidean check in the diagonal case, so every solution
-    found this way already satisfies feasible()'s exact check."""
+    found this way already satisfies feasible()'s exact check.
+    enforce_if: optional list of literals that must all be true for this
+    pair to need separating at all — e.g. a rotated-vs-unrotated pull
+    clearance variant that's only real when CP-SAT's ROT var picks that
+    branch (see the pull-clearance block below). None/empty means always
+    enforced, the original unconditional behavior."""
+    ei = enforce_if or []
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
     left = model.NewBoolVar(f"{name}_l")
     right = model.NewBoolVar(f"{name}_r")
     below = model.NewBoolVar(f"{name}_b")
     above = model.NewBoolVar(f"{name}_a")
-    model.Add(ax2 + gap_grid <= bx1).OnlyEnforceIf(left)
-    model.Add(bx2 + gap_grid <= ax1).OnlyEnforceIf(right)
-    model.Add(ay2 + gap_grid <= by1).OnlyEnforceIf(below)
-    model.Add(by2 + gap_grid <= ay1).OnlyEnforceIf(above)
-    model.AddBoolOr([left, right, below, above])
+    model.Add(ax2 + gap_grid <= bx1).OnlyEnforceIf([left, *ei])
+    model.Add(bx2 + gap_grid <= ax1).OnlyEnforceIf([right, *ei])
+    model.Add(ay2 + gap_grid <= by1).OnlyEnforceIf([below, *ei])
+    model.Add(by2 + gap_grid <= ay1).OnlyEnforceIf([above, *ei])
+    model.AddBoolOr([left, right, below, above]).OnlyEnforceIf(ei)
 
 def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
                  seed: int = 0, time_limit_s: float = 20.0, grid_m: float = CPSAT_GRID_M,
@@ -649,30 +672,46 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
             _cpsat_no_overlap(model, a, b, gap, f"sp{i}_{j}")
 
     # tube-pull clearance: swept rectangle vs site bounds/keepouts (racks
-    # included)/every other footprint
+    # included)/every other footprint. pull_side names a face of the
+    # EQUIPMENT, not a fixed compass direction (see _rotate_side_cw), so for
+    # a movable item whose ROT var CP-SAT is still free to choose, the real
+    # direction depends on which way it ends up rotated — build both
+    # variants (unrotated side active when rot=0, the 90deg-CW-rotated side
+    # active when rot=1) and make every constraint for a variant
+    # OnlyEnforceIf that branch, so exactly one is ever binding. Pinned
+    # items have no ROT var (never rotate) — one variant, unconditional,
+    # same as before this fix.
     for e in eq:
         if not e.pull_side or e.pull_len <= 0:
             continue
         l, b, fw, fd = L[e.tag], B[e.tag], FW[e.tag], FD[e.tag]
         length = _g_ceil(e.pull_len, G)
-        pr = {
-            "x+": (l + fw, b, l + fw + length, b + fd),
-            "x-": (l - length, b, l, b + fd),
-            "y+": (l, b + fd, l + fw, b + fd + length),
-            "y-": (l, b - length, l + fw, b),
-        }.get(e.pull_side.strip())
-        if pr is None:
-            continue
-        px1, py1, px2, py2 = pr
-        model.Add(px1 >= 0); model.Add(px2 <= site_w)
-        model.Add(py1 >= 0); model.Add(py2 <= site_d)
-        for i, box in enumerate(kboxes):
-            _cpsat_no_overlap(model, pr, box, 0, f"pullkeep{i}_{e.tag}")
-        for other in eq:
-            if other is e:
+        rot = ROT.get(e.tag)
+        side0 = e.pull_side.strip()
+        variants = [(side0, [rot.Not()] if rot is not None else [])]
+        if rot is not None:
+            variants.append((_rotate_side_cw(side0), [rot]))
+        for vi, (side, ei) in enumerate(variants):
+            pr = {
+                "x+": (l + fw, b, l + fw + length, b + fd),
+                "x-": (l - length, b, l, b + fd),
+                "y+": (l, b + fd, l + fw, b + fd + length),
+                "y-": (l, b - length, l + fw, b),
+            }.get(side)
+            if pr is None:
                 continue
-            ob = (L[other.tag], B[other.tag], L[other.tag] + FW[other.tag], B[other.tag] + FD[other.tag])
-            _cpsat_no_overlap(model, pr, ob, 0, f"pull_{e.tag}_{other.tag}")
+            px1, py1, px2, py2 = pr
+            model.Add(px1 >= 0).OnlyEnforceIf(ei)
+            model.Add(px2 <= site_w).OnlyEnforceIf(ei)
+            model.Add(py1 >= 0).OnlyEnforceIf(ei)
+            model.Add(py2 <= site_d).OnlyEnforceIf(ei)
+            for i, box in enumerate(kboxes):
+                _cpsat_no_overlap(model, pr, box, 0, f"pullkeep{i}_{e.tag}_{vi}", enforce_if=ei)
+            for other in eq:
+                if other is e:
+                    continue
+                ob = (L[other.tag], B[other.tag], L[other.tag] + FW[other.tag], B[other.tag] + FD[other.tag])
+                _cpsat_no_overlap(model, pr, ob, 0, f"pull_{e.tag}_{other.tag}_{vi}", enforce_if=ei)
 
     # prevailing wind: fired heater's upwind rectangle vs every other footprint
     if site.wind_dir:
@@ -736,7 +775,8 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
         w, d = (e.d, e.w) if rotated else (e.w, e.d)
         x = solver.Value(L[e.tag]) * G + w / 2
         y = solver.Value(B[e.tag]) * G + d / 2
-        e.x, e.y, e.w, e.d = x, y, w, d
+        pull_side = _rotate_side_cw(e.pull_side) if rotated else e.pull_side
+        e.x, e.y, e.w, e.d, e.pull_side = x, y, w, d, pull_side
     return piping_cost(eq, conns, site, keepouts)
 
 # ------------------------------------------- CP-SAT seed -> SA refine (item 14)

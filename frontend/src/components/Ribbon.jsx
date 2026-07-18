@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Loader2, Magnet,
-  MousePointer2, Palette, Pencil, Play, Ruler, Save, Search, Settings as SettingsIcon, Trash2, Zap,
+  MousePointer2, Palette, Pencil, Play, RotateCw, Ruler, Save, Search, Settings as SettingsIcon,
+  Trash2, Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -95,8 +96,8 @@ function ResultsDialog({ results }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="sm" title="Seed results">
-          <ListOrdered className="size-4" /> Results
+        <Button variant="ghost" size="icon" title="Seed results">
+          <ListOrdered className="size-4" />
         </Button>
       </DialogTrigger>
       <DialogContent>
@@ -240,6 +241,7 @@ export default function Ribbon(props) {
     viewMode, setViewMode,
     tool, setTool, bumpDrawPrompt, fit, zoomPct, setZoomPercent,
     bumpEditPrompt, selectedZone, deleteZone,
+    selectedEquip, rotateEquipment,
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
     theme, setTheme,
     rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth,
@@ -347,6 +349,21 @@ export default function Ribbon(props) {
             </ToggleGroup>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
+          <Group label="Rotate">
+            <Button
+              variant="outline" size="icon" disabled={!selectedEquip}
+              onClick={() => rotateEquipment(selectedEquip, 90)} title="Rotate selected equipment 90° CW"
+            >
+              <RotateCw />
+            </Button>
+            <Button
+              variant="outline" size="icon" disabled={!selectedEquip}
+              onClick={() => rotateEquipment(selectedEquip, 270)} title="Rotate selected equipment 270° CW (90° CCW)"
+            >
+              <RotateCw className="-scale-x-100" />
+            </Button>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
           <Group label="Zoom">
             <ZoomDialog zoomPct={zoomPct} setZoomPercent={setZoomPercent} />
             <Button variant="outline" size="icon" onClick={fit} title="Fit width"><ArrowLeftRight /></Button>
@@ -363,7 +380,7 @@ export default function Ribbon(props) {
             <div className="flex flex-col gap-1">
               <Input
                 id="seeds" value={seedsInput} onChange={(e) => setSeedsInput(e.target.value)}
-                title="n or a:b" placeholder="n or a:b" className="w-28"
+                title="n or a:b" placeholder="n or a:b" className="w-16"
               />
             </div>
           </Group>

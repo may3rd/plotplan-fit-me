@@ -498,3 +498,110 @@ Format: `- [date] finding — why it matters`
   hand-build one (or use plain `solve()`) rather than route through
   CP-SAT, even indirectly via a helper the code under test doesn't itself
   call.
+- [2026-07-18] Manual equipment rotate (90°/180°/270° CW) added to the
+  frontend, at explicit user request (not a PLAN.md item — item 7's
+  rotation is solver-internal/automatic SA move, this is a user-driven
+  ribbon action). No backend change: it's a pure `data.equipment` edit
+  (`App.jsx`'s `rotateEquipment`), same shape as `editZone` — swaps `w`/`d`
+  for a 90/270 delta (180 leaves them alone, a rectangle's bounding box is
+  180°-symmetric), and rotates `pull_side` through a fixed CW cycle
+  (`x+ -> y- -> x- -> y+ -> x+`, `rotateSide()` in `frontend/src/lib/
+  geom.js`) so a tube-pull clearance keeps pointing the same way relative
+  to the equipment instead of silently staying pinned to the old absolute
+  direction. Deliberately relative/delta rotation (each click rotates
+  whatever the current footprint/pull_side already are), not an absolute-
+  angle model — there's no stored rotation field, matching how solve()'s
+  own SA rotate move already treats orientation as pure w/d state, not a
+  tracked angle. New `selectedEquip` state (App.jsx) mirrors the existing
+  `selectedZone` pattern: click an equipment (any tool-select click, pinned
+  included — pinned only blocks *dragging*, not rotating) to select it,
+  click empty canvas to deselect, ribbon Rotate buttons disabled unless
+  something's selected. Verified in-browser: rotating E-102 (pull_side
+  `x+`, 6m) 90° swapped its footprint from 5x2 to 2x5 and moved its pull
+  rectangle to extend `y-` instead of `x+` (confirmed via DOM geometry, not
+  just eyeballing); a further 180° click left the footprint swapped
+  (correct — 90+180=270, same swapped-footprint family as 90°) and flipped
+  the pull rectangle to `y+` (confirmed 90° CW twice past `y-` lands on
+  `y+`, matching the fixed cycle). Rotating in place can flip a layout to
+  infeasible (e.g. the new footprint now overlaps a rack) — surfaced via
+  the existing status-bar feasibility check, same as a drag would, no new
+  mechanism needed. Follow-up same session: the 180° ribbon button was
+  removed at user request (90°/270° only now) — `rotateEquipment(tag, 180)`
+  and `rotateSide()`'s general N-step cycle stay in place, just unreachable
+  from the UI at exactly 180 today.
+- [2026-07-18] Fixed `pull_side` not rotating when the SOLVER (not the
+  manual Ribbon button above) rotates an item — SA's rotate move
+  (`solve()`) and CP-SAT's `ROT` var (`solve_cpsat()`) both already swapped
+  `w`/`d` (PLAN.md item 7/11) but left `pull_side` pointing the old
+  absolute direction, silently wrong once decoded (self-consistent inside
+  each solver's own search, since both used the same stale direction for
+  every constraint check, so no infeasible-layout bug — just a physically
+  incorrect clearance zone once you look at the result). Fixed both paths
+  with the same `_rotate_side_cw()` helper the manual rotate feature
+  already uses (`x+ -> y- -> x- -> y+ -> x+`): SA's rotate move now rotates
+  `pull_side` alongside `w`/`d`, with `undo()` restoring both; `best_pos`
+  snapshots grew from `(x,y,w,d)` to `(x,y,w,d,pull_side)` — a real bug
+  fixed in passing, not just future-proofing: `pull_side` wasn't in the old
+  tuple at all, so if a rotate got accepted (cost-neutral moves always are,
+  `exp(0/t)==1`) after the last cost-improving snapshot, the final restore
+  could reset `w`/`d` to an old orientation while leaving the *live*
+  (rotated) `pull_side` in place — caught by `test_rotate.py`'s SA test,
+  which deterministically nets 2 accepted rotations at seed 0 (w/d back to
+  original, but pull_side landed on `x-`, 180° from the original `x+` —
+  the old code would've left it stuck at `x+`). CP-SAT needed more: `ROT`
+  is a per-item decision variable unknown until solved, so the pull-rect
+  constraint now builds BOTH direction variants (original side / rotated
+  side) and makes each `OnlyEnforceIf` the matching `ROT`/`ROT.Not()`
+  branch — `_cpsat_no_overlap()` gained an `enforce_if` param for this
+  (empty list = always-on, so every pre-existing unconditional call site
+  needed no changes). Decode step now also sets `e.pull_side` when
+  `rotated` is true. `on_improve`'s streamed position tuples and
+  `api.py`'s SSE `improve` payload both grew a `pull_side` field to match
+  (no test/consumer broke — `test_stream.py` unpacks `t, *_`, and the
+  frontend doesn't handle `improve` events at all yet, only `progress`/
+  `done`). Separately found and fixed while verifying this: the frontend
+  never applied a solve/relax response's `w`/`d`/`pull_side` back onto
+  `data.equipment` at all — `App.jsx`'s solve() and `fireRelax()` only
+  ever extracted `{x, y}` into `positions`, so even a correctly-rotated
+  backend result would have rendered with the item's PRE-solve shape.
+  Fixed with a new `applyRotations(resEquipment)` (merges w/d/pull_side by
+  tag into `data.equipment`, mirroring `rotateEquipment`'s update shape),
+  called after both `solve()`'s `done` event and a feasible `/api/relax`
+  response. One real bug caught before it shipped: `applyRotations` was
+  first placed physically after `fireRelax` in the file but referenced in
+  `fireRelax`'s `useCallback` dependency array — `const` bindings aren't
+  hoisted, so that's a `ReferenceError` at render time (temporal dead
+  zone), not just a lint nit; moving the declaration above `fireRelax`
+  fixed it. Verified fully end-to-end in-browser (not just backend tests):
+  built a tiny project (one 6x2 exchanger, `pull_side x+`/`pull_len 3`, on
+  an 8m-wide x 20m-tall site — too narow for the unrotated footprint's
+  pull clearance to fit at all) via `File > Open` (injected through the
+  hidden file input with a synthetic `DataTransfer`, no OS file dialog
+  needed), clicked Solve, and watched the canvas actually redraw the item
+  rotated (6x2 -> 2x6) with its pull-clearance rectangle correctly swung
+  from pointing east to pointing south — `score 0`, feasible. New
+  `backend/test_rotate.py` covers `_rotate_side_cw()`'s cycle plus both
+  solver paths with scenarios chosen to be deterministic (CP-SAT: site
+  sized so only the rotated orientation can satisfy the pull-clearance
+  bound, not just feasibility-by-luck; SA: a rack + connection so
+  `piping_cost()` is position-sensitive enough to actually exercise
+  `best_pos` snapshot/restore, unlike a lone unconnected item where
+  rotation is cost-neutral and `best_pos` never updates past the initial
+  snapshot at all).
+- [2026-07-19] Tried, then fully reverted at explicit user request: an
+  Office-365-style adaptive ribbon (`ResponsiveRibbonRow`/`CollapsedGroup`
+  in `Ribbon.jsx`, a `frontend/src/components/ui/popover.jsx` primitive) —
+  groups collapsing into a single icon+chevron popover button when the
+  ribbon ran out of width, plus Home's Zoom/Rotate/Tools permanently
+  collapsed that way (Word's Paragraph/Styles-group look). Functionally it
+  ended up correct (verified across widths 350-1400px, two real bugs found
+  and fixed along the way — a ghost measurement row missing a layout class
+  and a bad "nothing fits" fallback) but "not work as I expect" — no
+  specifics captured before the revert, so if adaptive ribbon collapsing
+  comes up again, ask what specifically didn't work rather than re-building
+  the same mechanism. Ribbon.jsx is back to the pre-existing plain
+  always-expanded groups + `.ribbon-body`'s `overflow-x:auto` scroll
+  fallback (the original ponytail shortcut, never actually removed, just
+  temporarily superseded). The manual per-equipment Rotate feature (Home
+  ribbon's Rotate group, `rotateEquipment`/`selectedEquip` in `App.jsx`) is
+  unrelated and was kept.

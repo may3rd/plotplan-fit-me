@@ -443,6 +443,7 @@ export default function PlotCanvas({
   rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth, drawPromptNonce,
   editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone,
   selectedZone, setSelectedZone, editMode,
+  selectedEquip, setSelectedEquip,
   realtimeMode, relaxLayout, flushRelax,
 }) {
   const { equipment, connections, site, keepouts, spacing, wind_clearance_m: windClearanceM } = data
@@ -651,12 +652,16 @@ export default function PlotCanvas({
       return
     }
     if (tool === 'select' || tool === 'edit') setSelectedZone(null)
+    if (tool === 'select') setSelectedEquip(null)
   }
 
   function onPointerDownEquip(tag, ev) {
-    // Equipment is selectable/movable only in Select mode.
-    if (tool !== 'select' || byTag[tag].pinned) return
+    // Equipment is selectable only in Select mode; pinned items can still be
+    // selected (for rotating) even though they can't be dragged.
+    if (tool !== 'select') return
     ev.stopPropagation()
+    setSelectedEquip(tag)
+    if (byTag[tag].pinned) return
     dragTag.current = tag
     capture(ev)
   }
@@ -1152,7 +1157,7 @@ export default function PlotCanvas({
                   width={e.w}
                   height={e.d}
                   fill={viewMode === 'normal' ? (CLASS_COLOR[e.cls] ?? '#888') : 'none'}
-                  className={`equip ${e.pinned ? 'pinned' : ''} ${violating ? 'violating' : ''}`}
+                  className={`equip ${e.pinned ? 'pinned' : ''} ${violating ? 'violating' : ''} ${selectedEquip === e.tag ? 'selected' : ''}`}
                   onPointerDown={(ev) => onPointerDownEquip(e.tag, ev)}
                 />
                 <text x={p.x} y={toY(p.y) - e.d / 2 - 0.6} className="tag">{e.tag}</text>

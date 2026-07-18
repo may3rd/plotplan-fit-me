@@ -95,3 +95,18 @@ export function sideRect(x1, y1, x2, y2, side, length) {
     default: return null
   }
 }
+
+// Rotating a footprint 90deg clockwise cycles a direction the same way a
+// compass needle would: x+ -> y- -> x- -> y+ -> x+. Used to keep pull_side
+// pointing the same way relative to the equipment after a manual rotate
+// (unlike solve()'s SA rotate move, which only swaps w/d and leaves
+// pull_side untouched — fine there since SA never rotates a pulled item's
+// meaning, only its bounding box).
+const ROTATE_CW = { 'x+': 'y-', 'y-': 'x-', 'x-': 'y+', 'y+': 'x+' }
+
+/** `side` ("x+"/"x-"/"y+"/"y-"/"") rotated `deg` (90/180/270) clockwise. */
+export function rotateSide(side, deg) {
+  let s = side
+  for (let i = 0; i < (deg / 90) % 4; i++) s = ROTATE_CW[s] ?? s
+  return s
+}
