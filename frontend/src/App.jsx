@@ -30,7 +30,8 @@ function App() {
   const [viewMode, setViewMode] = useState('normal') // 'normal' | 'wireframe' | 'dxf'
   const [tool, setTool] = useState('select') // 'select' | 'pan' | 'edit'
   const editMode = tool === 'edit' // when 'edit', zones (road/rack/underground/other) are draggable on the canvas
-  const [rackWidth, setRackWidth] = useState(8) // meters, pipe-rack width (preferences, later)
+  const [rackWidth, setRackWidth] = useState(7.5) // meters, pipe-rack width (preferences, later)
+  const [rackBeamSpacing, setRackBeamSpacing] = useState(6) // meters, pipe-rack cross-tie beam spacing (preferences, later)
   const [roadWidth, setRoadWidth] = useState(6) // meters, road width (preferences, later)
   const [drawPromptNonce, setDrawPromptNonce] = useState(0) // bump to (re)open the road/rack width prompt
   const bumpDrawPrompt = useCallback(() => setDrawPromptNonce((n) => n + 1), [])
@@ -291,6 +292,7 @@ function App() {
           viewMode={viewMode}
           editMode={editMode}
           rackWidth={rackWidth} setRackWidth={setRackWidth}
+          rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
           roadWidth={roadWidth} setRoadWidth={setRoadWidth}
           drawPromptNonce={drawPromptNonce}
           editPromptNonce={editPromptNonce}

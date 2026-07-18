@@ -20,8 +20,11 @@ const CLASS_COLOR = {
 }
 
 const RULER = 26 // px thickness of each ruler strip
-const RACK_HATCH_SPACING = 4 // meters between pipe-rack cross-tie lines
 const SOFT_SNAP_M = 1.0 // soft-snap to the site border when a dragged point is within this many meters
+// If the last regularly-spaced beam interval lands closer than this to the
+// rack's far end, skip that beam and draw one exactly at the end instead —
+// avoids an awkward, oddly-short final bay.
+const RACK_BEAM_END_MIN_GAP_M = 3
 // Maximum INNER road-turn fillet radius, in meters (the tight notch on the
 // inside of a bend). Fixed for now rather than derived — ponytail: promote
 // to a per-project/user setting if it matters, plain constant is enough
@@ -109,31 +112,68 @@ function snapAxisAligned(start, p) {
     : [start[0], p[1]]
 }
 
-// Cross-tie hatch segments for a rack polygon, running ACROSS its width
-// (perpendicular to the centerline) at `spacing` intervals along its length.
-// Recovers the centerline/width from the polygon corners produced by centerlineRect.
-function rackHatchSegments(poly, spacing) {
-  const [v0, v1, v2, v3] = poly
-  const start = [(v0[0] + v3[0]) / 2, (v0[1] + v3[1]) / 2]
-  const end = [(v1[0] + v2[0]) / 2, (v1[1] + v2[1]) / 2]
-  const dx = end[0] - start[0]
-  const dy = end[1] - start[1]
-  const len = Math.hypot(dx, dy)
+// Cross-tie hatch segments for a rack rectangle, running ACROSS its width
+// (perpendicular to its length) at `spacing` intervals. Anchored at the
+// rectangle's own LEFT edge (wider-than-tall) or TOP edge (max Y — this app
+// is north-up with a toY screen flip — taller-than-wide), derived from its
+// bounding box rather than draw order, so a merged rack's spacing lines up
+// the same regardless of which original zone/corner it grew from. If the
+// last regular interval would land within RACK_BEAM_END_MIN_GAP_M of the far
+// end, that beam snaps exactly to the end instead of leaving an awkwardly
+// short final bay. `excludeDRanges` (local d-coordinates along the length
+// axis, 0 = anchor) drops any beam that would fall inside another rack's
+// footprint where this one crosses it — see rackCrossDRange.
+function rackHatchSegments(poly, spacing, excludeDRanges = []) {
+  if (!(spacing > 0)) return [] // guard against a bad (<=0/NaN) spacing value hanging the loop below
+  const { minX, maxX, minY, maxY } = zoneBBox(poly)
+  const w = maxX - minX
+  const h = maxY - minY
+  const horizontal = w >= h
+  const len = horizontal ? w : h
+  const halfW = (horizontal ? h : w) / 2
+  const cx = (minX + maxX) / 2
+  const cy = (minY + maxY) / 2
+  const originX = horizontal ? minX : cx
+  const originY = horizontal ? cy : maxY
+  const ux = horizontal ? 1 : 0
+  const uy = horizontal ? 0 : -1
   if (len < 1e-6) return []
-  const ux = dx / len
-  const uy = dy / len
-  // half-width = distance from centerline to a side vertex
-  const halfW = Math.hypot(v0[0] - start[0], v0[1] - start[1])
-  const segs = []
-  for (let d = spacing; d < len; d += spacing) {
-    const px = start[0] + ux * d
-    const py = start[1] + uy * d
-    segs.push({
+  const positions = []
+  for (let d = spacing; d < len; d += spacing) positions.push(d)
+  if (positions.length && len - positions[positions.length - 1] < RACK_BEAM_END_MIN_GAP_M) {
+    positions[positions.length - 1] = len
+  }
+  // drop any regular beam that would run straight through the crossing
+  // square, then frame that square instead — a beam exactly at each edge
+  // (lo/hi) where it meets the rack it crosses, on all 4 sides once both
+  // racks contribute their own two edges — so the crossing still reads as
+  // supported structure, not just a gap.
+  const kept = positions.filter((d) => !excludeDRanges.some(([lo, hi]) => d > lo && d < hi))
+  excludeDRanges.forEach(([lo, hi]) => {
+    ;[lo, hi].forEach((d) => {
+      if (d >= 0 && d <= len && !kept.some((k) => Math.abs(k - d) < 1e-6)) kept.push(d)
+    })
+  })
+  return kept.map((d) => {
+    const px = originX + ux * d
+    const py = originY + uy * d
+    return {
       x1: px - uy * halfW, y1: py + ux * halfW,
       x2: px + uy * halfW, y2: py - ux * halfW,
-    })
-  }
-  return segs
+    }
+  })
+}
+
+// Convert another rack's footprint into an exclusion range along THIS
+// rack's own length axis (same local d-coordinates rackHatchSegments uses),
+// so its hatch can skip the square where the two racks actually cross —
+// each rack keeps its own beams along its own length, just none land on
+// top of whichever rack it crosses.
+function rackCrossDRange(rackBBox, otherBBox) {
+  const horizontal = rackBBox.maxX - rackBBox.minX >= rackBBox.maxY - rackBBox.minY
+  if (horizontal) return [otherBBox.minX - rackBBox.minX, otherBBox.maxX - rackBBox.minX]
+  // vertical: d increases as world Y decreases from the rack's top (maxY)
+  return [rackBBox.maxY - otherBBox.maxY, rackBBox.maxY - otherBBox.minY]
 }
 
 // Build a zone rectangle from a centerline (start->end) and a width — used
@@ -176,28 +216,48 @@ function rectsOverlap(a, b, eps = 0.05) {
     && a.minY <= b.maxY + eps && a.maxY >= b.minY - eps
 }
 
-// Union-find clustering of road zones by rectangle overlap/touch, so a chain
-// of roads that connect end-to-end merges into one shape even where not
-// every pair directly overlaps (A touches B, B touches C -> one cluster).
-function clusterRoadZones(roadEntries) {
-  const n = roadEntries.length
+// Generic union-find clustering of zone entries {zone, poly, bbox} by a
+// pairwise shouldMerge(bboxA, bboxB) predicate, so a chain transitively
+// merges into one cluster even where not every pair directly satisfies the
+// predicate (A merges with B, B merges with C -> one cluster of all three).
+function clusterZones(entries, shouldMerge) {
+  const n = entries.length
   const parent = Array.from({ length: n }, (_, i) => i)
   const find = (x) => (parent[x] === x ? x : (parent[x] = find(parent[x])))
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      if (rectsOverlap(roadEntries[i].bbox, roadEntries[j].bbox)) {
+      if (shouldMerge(entries[i].bbox, entries[j].bbox)) {
         const ri = find(i); const rj = find(j)
         if (ri !== rj) parent[ri] = rj
       }
     }
   }
   const groups = new Map()
-  roadEntries.forEach((r, i) => {
+  entries.forEach((e, i) => {
     const root = find(i)
     if (!groups.has(root)) groups.set(root, [])
-    groups.get(root).push(r)
+    groups.get(root).push(e)
   })
   return [...groups.values()]
+}
+
+// Road zones cluster on any overlap/touch, regardless of orientation — a
+// chain of roads extending or turning should all read as one continuous road.
+function clusterRoadZones(roadEntries) {
+  return clusterZones(roadEntries, rectsOverlap)
+}
+
+// Unlike roads, pipe racks only merge where they actually CROSS (one
+// horizontal, one vertical) — two racks extending the same line stay
+// separate, distinct segments rather than silently fusing into one.
+function isPerpendicular(a, b) {
+  const aVert = a.maxX - a.minX <= a.maxY - a.minY
+  const bVert = b.maxX - b.minX <= b.maxY - b.minY
+  return aVert !== bVert
+}
+
+function clusterRackZones(rackEntries) {
+  return clusterZones(rackEntries, (a, b) => rectsOverlap(a, b) && isPerpendicular(a, b))
 }
 
 // Two perpendicular roads joined by the two-click tool only reach each
@@ -380,7 +440,7 @@ function rackColumnPoints(poly, hatch) {
 export default function PlotCanvas({
   data, positions, onPositions, view, setView, showGrid, showRuler, gridStep, snap, tool, setTool,
   viewMode,
-  rackWidth, setRackWidth, roadWidth, setRoadWidth, drawPromptNonce,
+  rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth, drawPromptNonce,
   editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone,
   selectedZone, setSelectedZone, editMode,
 }) {
@@ -402,6 +462,19 @@ export default function PlotCanvas({
     roadClusters.forEach((cluster) => cluster.forEach((r) => m.set(r.zone, cluster.length)))
     return m
   }, [roadClusters])
+  // pipe racks only cluster where they actually CROSS (see clusterRackZones)
+  // — two racks extending the same line stay separate, distinct segments.
+  const rackClusters = useMemo(() => {
+    const rackEntries = Object.entries(keepouts ?? {})
+      .filter(([z]) => z.toUpperCase().startsWith('RACK'))
+      .map(([zone, poly]) => ({ zone, poly, bbox: zoneBBox(poly) }))
+    return clusterRackZones(rackEntries)
+  }, [keepouts])
+  const rackClusterSize = useMemo(() => {
+    const m = new Map()
+    rackClusters.forEach((cluster) => cluster.forEach((r) => m.set(r.zone, cluster.length)))
+    return m
+  }, [rackClusters])
 
   // roads and pipe racks share the same two-click centerline+width draw
   // interaction (see DRAW_PREFIX); maintenance/underground/keep-out draw as
@@ -427,6 +500,7 @@ export default function PlotCanvas({
   const [editOpen, setEditOpen] = useState(false) // zone rename/role dialog
   const [drawPromptOpen, setDrawPromptOpen] = useState(false)
   const [drawPromptVal, setDrawPromptVal] = useState(String(drawWidth))
+  const [drawPromptSpacingVal, setDrawPromptSpacingVal] = useState(String(rackBeamSpacing)) // rack-only "Beam spacing (m)" field
   const [zoneDrawing, setZoneDrawing] = useState(false) // true while a zone-draw press-drag-release is in progress
 
   // view is null for the first frame (until App computes the fit off the
@@ -510,6 +584,7 @@ export default function PlotCanvas({
   useEffect(() => {
     if (!drawKind || isRectDraw) return
     setDrawPromptVal(String(drawWidth))
+    if (drawKind === 'rack') setDrawPromptSpacingVal(String(rackBeamSpacing))
     setDrawPromptOpen(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawPromptNonce, drawKind])
@@ -526,6 +601,10 @@ export default function PlotCanvas({
   function confirmDrawWidth() {
     const n = Number(drawPromptVal)
     if (Number.isFinite(n) && n > 0) setDrawWidth(n)
+    if (drawKind === 'rack') {
+      const s = Number(drawPromptSpacingVal)
+      if (Number.isFinite(s) && s > 0) setRackBeamSpacing(s)
+    }
     setDrawPromptOpen(false)
   }
 
@@ -870,15 +949,20 @@ export default function PlotCanvas({
               : upper.startsWith('ROAD') ? 'road'
               : upper.startsWith('MAINT') ? 'maint' : 'keepout'
             const [cx, cy] = centroid(poly)
-            const hatch = kind === 'rack' ? rackHatchSegments(poly, RACK_HATCH_SPACING) : []
             const selected = selectedZone === zone
-            // a road that's part of a multi-segment merged cluster (see
-            // roadClusters) drops its own stroke — the merged outline drawn
-            // after this loop supplies the (rounded) boundary line instead,
-            // so no seam shows at the join. Real DXF export never merges
-            // (each zone is its own separate LINE outline), so skip this in
-            // DXF view and keep every road's true individual boundary.
-            const quiet = kind === 'road' && viewMode !== 'dxf' && (roadClusterSize.get(zone) ?? 1) > 1
+            // A road/rack that's part of a multi-member merged cluster (see
+            // roadClusters/rackClusters) drops its own stroke (and, for
+            // racks, its hatch/columns/label too) — the merged shape drawn
+            // after this loop supplies the boundary (and for racks, the
+            // single unified hatch pattern) instead, so no seam or duplicate
+            // beam shows at the join. Real DXF export never merges (each
+            // zone is its own separate LINE outline), so skip this in DXF
+            // view and keep every zone's true individual boundary/hatch.
+            const clusterSize = kind === 'road' ? (roadClusterSize.get(zone) ?? 1)
+              : kind === 'rack' ? (rackClusterSize.get(zone) ?? 1)
+              : 1
+            const quiet = (kind === 'road' || kind === 'rack') && viewMode !== 'dxf' && clusterSize > 1
+            const hatch = kind === 'rack' && !quiet ? rackHatchSegments(poly, rackBeamSpacing) : []
             return (
               <g key={zone}>
                 <polygon
@@ -890,7 +974,7 @@ export default function PlotCanvas({
                 {viewMode !== 'dxf' && hatch.map((l, i) => (
                   <line key={i} x1={l.x1} y1={toY(l.y1)} x2={l.x2} y2={toY(l.y2)} className="rack-hatch" />
                 ))}
-                {viewMode !== 'dxf' && kind === 'rack' && rackColumnPoints(poly, hatch).map(([x, y], i) => (
+                {viewMode !== 'dxf' && kind === 'rack' && !quiet && rackColumnPoints(poly, hatch).map(([x, y], i) => (
                   <rect
                     key={`col${i}`}
                     x={x - RACK_COLUMN_SIZE / 2} y={toY(y) - RACK_COLUMN_SIZE / 2}
@@ -904,7 +988,7 @@ export default function PlotCanvas({
                   <text x={cx} y={toY(cy) + 0.6} className="zone-label">{zone}</text>
                 ) : (
                   <>
-                    {kind === 'rack' && <text x={cx} y={toY(cy) + 0.6} className="rack-label">Pipe Rack</text>}
+                    {kind === 'rack' && !quiet && <text x={cx} y={toY(cy) + 0.6} className="rack-label">Pipe Rack</text>}
                     {kind === 'road' && <text x={cx} y={toY(cy) + 0.6} className="zone-label">Road</text>}
                   </>
                 )}
@@ -966,6 +1050,50 @@ export default function PlotCanvas({
                 d={roundedPolygonPath(outline, radii, toY)}
                 className="zone-merge-outline"
               />
+            )
+          })}
+
+          {/* Pipe racks only merge where they actually cross (see
+              clusterRackZones) — into the true L/T/+ union of the actual
+              footprints (reusing withCornerFills/unionRoadOutline from the
+              road merge, minus any rounding — racks are structural corridors,
+              not vehicle paths, so sharp corners are fine), never a bounding
+              rectangle that could balloon past what either rack actually
+              covers. Each original rack still draws its OWN beam pattern
+              along its own length (anchored left/top, see rackHatchSegments)
+              — only the square where it actually crosses another rack in the
+              cluster is excluded (see rackCrossDRange), so no beam lands on
+              top of the rack it crosses. */}
+          {viewMode !== 'dxf' && rackClusters.filter((c) => c.length > 1).map((cluster, ci) => {
+            const rects = cluster.map((r) => r.bbox)
+            const outline = unionRoadOutline(withCornerFills(rects))
+            if (outline.length < 3) return null
+            const [cx, cy] = centroid(outline)
+            const hatch = cluster.flatMap((r) => {
+              const excludeDRanges = cluster
+                .filter((other) => other !== r && rectsOverlap(r.bbox, other.bbox))
+                .map((other) => rackCrossDRange(r.bbox, other.bbox))
+              return rackHatchSegments(r.poly, rackBeamSpacing, excludeDRanges)
+            })
+            return (
+              <g key={`rack-merge-${ci}`}>
+                <polygon
+                  points={outline.map(([x, y]) => `${x},${toY(y)}`).join(' ')}
+                  className="rack-merge-fill"
+                />
+                {hatch.map((l, i) => (
+                  <line key={i} x1={l.x1} y1={toY(l.y1)} x2={l.x2} y2={toY(l.y2)} className="rack-hatch" />
+                ))}
+                {rackColumnPoints(outline, hatch).map(([x, y], i) => (
+                  <rect
+                    key={`col${i}`}
+                    x={x - RACK_COLUMN_SIZE / 2} y={toY(y) - RACK_COLUMN_SIZE / 2}
+                    width={RACK_COLUMN_SIZE} height={RACK_COLUMN_SIZE}
+                    className="rack-column"
+                  />
+                ))}
+                <text x={cx} y={toY(cy) + 0.6} className="rack-label">Pipe Rack</text>
+              </g>
             )
           })}
 
@@ -1090,7 +1218,7 @@ export default function PlotCanvas({
             // user sees the final shape while placing the second point.
             const poly = isRectDraw ? rectFromCorners(a, b) : centerlineRect(a, b, drawWidth)
             const [cx, cy] = centroid(poly)
-            const hatch = drawKind === 'rack' ? rackHatchSegments(poly, RACK_HATCH_SPACING) : []
+            const hatch = drawKind === 'rack' ? rackHatchSegments(poly, rackBeamSpacing) : []
             return (
               <g className="zone-ghost">
                 <polygon
@@ -1131,6 +1259,18 @@ export default function PlotCanvas({
                 onKeyDown={(e) => { if (e.key === 'Enter') confirmDrawWidth() }}
               />
             </div>
+            {drawKind === 'rack' && (
+              <div className="flex items-center gap-2">
+                <Label htmlFor="draw-spacing" className="text-sm">Beam spacing (m)</Label>
+                <Input
+                  id="draw-spacing" type="number" min="0.5" step="0.5"
+                  value={drawPromptSpacingVal}
+                  onChange={(e) => setDrawPromptSpacingVal(e.target.value)}
+                  className="w-24"
+                  onKeyDown={(e) => { if (e.key === 'Enter') confirmDrawWidth() }}
+                />
+              </div>
+            )}
             <DialogFooter>
               <Button variant="outline" onClick={() => { setDrawPromptOpen(false); setTool('select') }}>
                 Cancel

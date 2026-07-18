@@ -395,6 +395,34 @@
   stroke-width: 0.8;
 }
 
+/* a rack that's part of a merged (crossing) cluster (see rackClusters in
+   PlotCanvas) renders invisible, same reasoning as merged roads above — the
+   merge-fill rectangle drawn on top supplies the fill/stroke/hatch for the
+   whole cluster instead, so no seam or duplicate beam shows at the crossing.
+   Still shows its own true rectangle while actively selected. */
+.zone.rack.merged-quiet {
+  fill: none;
+  stroke: none;
+  pointer-events: all;
+}
+
+.zone.rack.merged-quiet.selected {
+  fill: #8bc98f;
+  fill-opacity: 0.55;
+  stroke: #2563eb;
+  stroke-width: 2.5;
+  stroke-dasharray: 2 1;
+}
+
+.rack-merge-fill {
+  fill: #8bc98f;
+  fill-opacity: 0.55;
+  stroke: #4a8f52;
+  stroke-width: 0.8;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
 .zone.selected {
   stroke: #2563eb;
   stroke-width: 2.5;
@@ -571,7 +599,9 @@
 
 .plot[data-view='wireframe'] .zone,
 .plot[data-view='wireframe'] .pull-zone,
-.plot[data-view='wireframe'] .wind-zone {
+.plot[data-view='wireframe'] .wind-zone,
+.plot[data-view='wireframe'] .zone-merge-outline,
+.plot[data-view='wireframe'] .rack-merge-fill {
   fill: none;
 }
 
