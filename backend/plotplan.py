@@ -377,12 +377,19 @@ def _move_feasible(e, eq, site, spacing, kboxes, wind_dir):
     return True
 
 def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
-          seed=0, iters=60000, t0=50.0, t1=0.05, on_progress=None, warm_start=False) -> float:
+          seed=0, iters=60000, t0=50.0, t1=0.05, on_improve=None, should_stop=None,
+          warm_start=False) -> float:
     """Simulated annealing over feasible moves. Returns best cost.
-    on_progress: optional callable(fraction in [0,1]) fired ~100 times
-    across the run — lets a UI show a real %-done bar instead of a spinner.
-    The fraction is k/iters (the loop always runs iters iterations unless
-    every item is pinned), so it's a faithful time estimate, not a guess.
+    on_improve: optional callable(best_cost, positions, k) fired every time
+    SA accepts a new best (not throttled — an "anytime" stream of every
+    real improvement, not a periodic heartbeat). positions is a snapshot
+    list of (tag, x, y, w, d) tuples, safe to hold onto after the call —
+    eq itself keeps mutating every iteration, so the live objects aren't.
+    should_stop: optional callable() -> bool, checked every iteration; a
+    truthy return breaks the loop early. Whatever iteration it stops at,
+    eq is written back to best_pos before returning (see below), which is
+    always a feasible layout — early-stopping can only return a worse (or
+    equal) score than letting the anneal finish, never a broken one.
     warm_start: if True, skip random_place()'s scatter-then-reject init and
     anneal starting from eq's current x/y/w/d instead — the caller (item
     14's CP-SAT-seed pipeline) must guarantee that starting layout is
@@ -412,12 +419,9 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
     cost = piping_cost(eq, conns, site, keepouts)
     best = cost
     best_pos = [(e.x, e.y, e.w, e.d) for e in eq]
-    # ponytail: throttle on_progress to ~100 calls (every iters/100
-    # iterations) — firing all 60000 would itself become the bottleneck.
-    prog_step = max(1, iters // 100) if on_progress else 0
     for k in range(iters):
-        if prog_step and k % prog_step == 0:
-            on_progress(k / iters)
+        if should_stop and should_stop():
+            break
         if not movable:
             break  # everything pinned — nothing left to optimize
         t = t0 * (t1 / t0) ** (k / iters)
@@ -478,12 +482,12 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
             cost = new
             if cost < best:
                 best, best_pos = cost, [(q.x, q.y, q.w, q.d) for q in eq]
+                if on_improve:
+                    on_improve(best, [(q.tag, q.x, q.y, q.w, q.d) for q in eq], k)
         else:
             undo()
     for e, (x, y, w, d) in zip(eq, best_pos):
         e.x, e.y, e.w, e.d = x, y, w, d
-    if on_progress:
-        on_progress(1.0)
     return best
 
 # ------------------------------------------------------ CP-SAT solver (item 11)
@@ -748,7 +752,7 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
 CPSAT_SEED_THRESHOLD = 15   # movable-item count above which solve_one() seeds with CP-SAT before SA
 
 def solve_one(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dict = None,
-              seed: int = 0, on_progress=None) -> float:
+              seed: int = 0, on_improve=None, should_stop=None) -> float:
     """Solve one seed with the right pipeline, and only one place deciding
     which: plain SA below CPSAT_SEED_THRESHOLD movable items; above it (or
     if random_place() still fails below it — a tight site can do that even
@@ -757,19 +761,20 @@ def solve_one(eq: list, conns: list, site: Site, spacing: dict = None, keepouts:
     Mutates eq in place, same contract as solve()/solve_cpsat(). Shared by
     solve_ranked() (CLI) and api.py's /api/solve worker so this dispatch
     logic lives in exactly one place instead of two copies drifting apart.
-    on_progress is only wired to the SA phase — CP-SAT's own construction
-    step has no progress hook (see solve_cpsat) and firing on_progress(0..1)
-    once for construction then again for SA refine would make a %-done bar
-    visibly jump backward for no benefit."""
+    on_improve/should_stop are only wired to the SA phase(s) — CP-SAT's own
+    construction step is a one-shot constraint solve, not an iterative
+    anneal, so "new best" and "stop early" aren't meaningful mid-construction."""
     movable = sum(1 for e in eq if not e.pinned)
     if movable <= CPSAT_SEED_THRESHOLD:
         try:
-            return solve(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress)
+            return solve(eq, conns, site, spacing, keepouts, seed=seed,
+                         on_improve=on_improve, should_stop=should_stop)
         except RuntimeError as exc:
             if "no feasible initial layout" not in str(exc):
                 raise
     solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed)
-    return solve(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress, warm_start=True)
+    return solve(eq, conns, site, spacing, keepouts, seed=seed,
+                 on_improve=on_improve, should_stop=should_stop, warm_start=True)
 
 # ------------------------------------------------- Mode 2 push-repair (item 17)
 

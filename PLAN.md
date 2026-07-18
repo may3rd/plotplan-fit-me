@@ -319,23 +319,47 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     passes `_check()`; a drop exactly concentric with another item (no
     push direction is mathematically defined) reports `{feasible: False}`
     honestly rather than looping or raising.
-18. `[~]` **Anytime progress streaming** — partially done. `solve()`
-    already takes `on_progress(fraction)` (`plotplan.py:378-379`, fired
-    ~100x per run via throttled `prog_step`) and `POST /api/solve`
-    (`api.py:150-218`) already streams real SSE (`progress`/`done`
-    events) off a background thread. What's missing vs. the original
-    intent: the callback carries only a 0-1 fraction, not
-    `(best_cost, positions, k)` — so the frontend can show a percent bar
-    but not a live score curve or live-updating incumbent layout during
-    the anneal, only once at the end (the `done` event). Remaining work:
-    change `on_progress` to `on_improve(best_cost, positions, k)`, fired
-    only when SA accepts a new best (default `None`, zero behavior change
-    for CLI callers); thread it through `solve_ranked()`'s per-seed loop;
-    have `POST /api/solve`'s SSE emit an `improve` event per call instead
-    of/alongside the coarse `progress` event. Frontend: live score curve +
-    Stop button. Verify: stream on sample_unit ends at the same score as
-    the non-streaming path for the same seed; stopping mid-run returns a
-    feasible, `_check()`-passing layout.
+18. `[x]` **Anytime progress streaming** — `solve()`'s `on_progress(fraction)`
+    replaced outright with two independent, decoupled params: `on_improve
+    (best_cost, positions, k)`, fired every time (unthrottled — a true
+    anytime stream, not a periodic heartbeat) SA accepts a new best —
+    `positions` is a `(tag, x, y, w, d)` tuple snapshot, safe to hold onto
+    after the call unlike the live `eq` objects, which keep mutating; and
+    `should_stop()` (no args, checked every iteration, breaks the loop
+    early on a truthy return). Both default `None` — zero behavior change
+    for CLI callers. `solve_one()` threads both through to its SA call(s)
+    only — CP-SAT's own construction (`solve_cpsat`) is a one-shot
+    constraint solve, not an iterative anneal, so "new best"/"stop early"
+    aren't meaningful mid-construction (matches item 14's existing
+    on_progress-not-passed-to-CP-SAT precedent).
+    `api.py`'s `POST /api/solve` now emits an `improve` SSE event (seed,
+    iteration, cost, positions) alongside the existing per-seed-start
+    `progress` event, and the stream loop is now `async`, polling its
+    queue non-blockingly so it can also poll `request.is_disconnected()`
+    each cycle — a closed connection (a future frontend Stop button, or
+    just the client navigating away) sets a `threading.Event` that
+    `should_stop` reads, so the background solve winds down instead of
+    running to completion for a client that's gone.
+    ponytail ceiling: a disconnect during CP-SAT's own construction phase
+    (>`CPSAT_SEED_THRESHOLD` movable items) isn't interruptible until it
+    reaches the SA phase — CP-SAT has no stop hook (same limitation
+    `solve_cpsat`'s docstring already documents for progress). Fine for
+    now since sample_unit-scale units (this item's verify target) never
+    hit that path; upgrade CP-SAT's own call with a time-boxed retry loop
+    checking `should_stop` between attempts if large-unit responsiveness
+    ever matters.
+    Verified in `backend/test_stream.py`: `on_improve` fires 100+ times
+    on sample_unit with monotonically non-increasing costs, its last call
+    matches `solve()`'s returned best; `should_stop=lambda: True` halts
+    before any move runs and still returns `random_place()`'s (feasible)
+    starting layout; attaching both callbacks with `should_stop` always
+    `False` gives byte-identical costs/positions to not attaching them at
+    all (same seed). Also smoke-tested the live endpoint directly (`curl`
+    against a running `uvicorn`): a real 2-seed SSE stream on sample_unit
+    produces `progress`/`improve`/`done` events and a final cost matching
+    the CLI (344 @ seed 1); forcibly disconnecting mid-solve (`curl
+    --max-time`, a 31-item unit) leaves the server responsive to
+    subsequent requests immediately after, no hang or crash.
 
 ## Optional later (not scheduled)
 

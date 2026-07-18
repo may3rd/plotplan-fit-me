@@ -11,12 +11,13 @@ temp file each export briefly uses to reuse write_dxf()/write_takeoff().
 
 Run: uvicorn api:app --reload --port 8000
 """
+import asyncio
 import json
 import os
 import tempfile
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -186,22 +187,30 @@ class SolveRequest(BaseModel):
 
 
 @app.post("/api/solve")
-def solve_data(req: SolveRequest):
+def solve_data(req: SolveRequest, request: Request):
     """Same ranking loop as plotplan.solve_ranked(), but building each
     seed's Equipment list fresh from the posted CaseData instead of
-    reloading CSVs from disk. Streams `progress` SSE events (one per
-    seed-start and ~100 per SA solve iteration batch) so the frontend
-    can show a real %-done bar, then a final `done` event with the result.
+    reloading CSVs from disk. Streams a `progress` SSE event per seed-start
+    and an `improve` event every time that seed's SA finds a new best
+    (PLAN.md item 18 — an anytime stream: the frontend can plot a live
+    score curve instead of just a %-done bar), then a final `done` event
+    with the result.
     ponytail: a background thread runs the blocking solver while the
     request thread yields SSE chunks from a queue — FastAPI's
     StreamingResponse drives the SSE wire format, the thread + queue
     bridge the sync solver to the async stream. No async rewrite of
-    plotplan.py needed.
+    plotplan.py needed. The stream loop polls the queue instead of
+    blocking on it so it can also poll request.is_disconnected() — a
+    closed connection (the frontend's Stop button, or just navigating
+    away) sets stop_event, which solve()'s should_stop checks every
+    iteration and returns the best-so-far (always feasible — see
+    solve()'s docstring) instead of running to completion pointlessly.
     """
     import queue as _q
     import threading
 
     q: _q.Queue = _q.Queue()
+    stop_event = threading.Event()
 
     def emit(kind, payload=None):
         q.put({"event": kind, "data": json.dumps(payload) if payload is not None else ""})
@@ -212,29 +221,30 @@ def solve_data(req: SolveRequest):
             results = []
             best = None  # (cost, eq)
             for i, seed in enumerate(req.seeds):
+                if stop_event.is_set():
+                    break
                 emit("progress", {"fraction": i / n, "seed": seed, "seed_index": i, "seed_count": n})
                 eq, conns, spacing, site, keepouts = _build_case(req.data)
 
-                # ponytail: SA fires on_progress 100 times across its
-                # iters; map each seed's internal fraction into the whole
-                # solve's [i/n, (i+1)/n] slice so the bar advances
-                # smoothly within a seed too, not just per seed. Only
-                # solve_one()'s SA phase fires on_progress (see its
-                # docstring) — CP-SAT's own construction step has no
-                # progress hook.
-                def on_progress(frac, _i=i, _n=n):
-                    emit("progress", {"fraction": (_i + frac) / _n, "seed": seed,
-                                      "seed_index": _i, "seed_count": _n})
+                def on_improve(cost, positions, k, _seed=seed, _i=i):
+                    emit("improve", {"seed": _seed, "seed_index": _i, "iteration": k, "cost": cost,
+                                     "equipment": [{"tag": t, "x": x, "y": y, "w": w, "d": d}
+                                                   for t, x, y, w, d in positions]})
 
-                cost = solve_one(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress)
+                cost = solve_one(eq, conns, site, spacing, keepouts, seed=seed,
+                                 on_improve=on_improve, should_stop=stop_event.is_set)
                 results.append((seed, cost))
                 if best is None or cost < best[0]:
                     best = (cost, eq)
+            if best is None:
+                emit("error", {"message": "stopped before any seed finished"})
+                return
             results.sort(key=lambda r: r[1])
             emit("done", {
                 "results": [{"seed": s, "cost": c} for s, c in results],
                 "cost": best[0],
                 "equipment": [asdict(e) for e in best[1]],
+                "stopped": stop_event.is_set(),
             })
         except Exception as e:  # ponytail: surface solver errors to the UI instead of a hung stream
             emit("error", {"message": str(e)})
@@ -243,9 +253,15 @@ def solve_data(req: SolveRequest):
 
     threading.Thread(target=worker, daemon=True).start()
 
-    def stream():
+    async def stream():
         while True:
-            msg = q.get()
+            if await request.is_disconnected():
+                stop_event.set()
+            try:
+                msg = q.get_nowait()
+            except _q.Empty:
+                await asyncio.sleep(0.05)
+                continue
             if msg is None:
                 break
             yield f"event: {msg['event']}\ndata: {msg['data']}\n\n"
