@@ -1,7 +1,7 @@
 import { ZoomDialog } from '@/components/Ribbon'
 
 export default function StatusBar({
-  projectLabel, score, cursor, zoomPct, setZoomPercent, tool, realtimeMode,
+  projectLabel, score, cursor, zoomPct, setZoomPercent, tool, realtimeMode, relaxOk,
 }) {
   return (
     <div className="statusbar">
@@ -17,7 +17,13 @@ export default function StatusBar({
       {realtimeMode && (
         <>
           <span className="status-sep" />
-          <span className="statusbar-realtime">⚡ Real-time</span>
+          {relaxOk
+            ? <span className="statusbar-realtime">⚡ Real-time</span>
+            : (
+              <span className="text-destructive" title="Too many overlaps for real-time to legalize — try Solve first, or drag to a more open spot">
+                ⚡ Real-time — can't reflow here
+              </span>
+            )}
         </>
       )}
       <span className="ml-auto tabular-nums">

@@ -138,6 +138,12 @@ function App() {
   // /relax's response (feasible flag + reflowed positions) simply supersedes
   // it a beat later.
   const [realtimeMode, setRealtimeMode] = useState(false)
+  // Whether the LAST /relax attempt actually reflowed the layout (vs. push-
+  // repair/SA finding no legal fix and reporting infeasible) — surfaced in
+  // the status bar so a blocked reflow reads as "can't fit this", not as
+  // "real-time mode isn't doing anything". Starts true so the ribbon
+  // doesn't flash a warning before the first drag.
+  const [relaxOk, setRelaxOk] = useState(true)
   const relaxReqId = useRef(0)
   const relaxThrottle = useRef({ lastSentAt: 0, timer: null, latest: null })
 
@@ -155,7 +161,9 @@ function App() {
     })
       .then((r) => r.json())
       .then((res) => {
-        if (id !== relaxReqId.current || !res.feasible) return
+        if (id !== relaxReqId.current) return
+        setRelaxOk(res.feasible)
+        if (!res.feasible) return
         const pos = {}
         for (const e of res.equipment) pos[e.tag] = { x: e.x, y: e.y }
         setPositions(pos)
@@ -185,6 +193,14 @@ function App() {
       fireRelax()
     }
   }, [fireRelax])
+
+  // Reset the "blocked" indicator whenever the toggle switches on, so a
+  // stale failure from the last time it was enabled doesn't show before
+  // the user has even tried a new drag.
+  const toggleRealtimeMode = useCallback((on) => {
+    setRealtimeMode(on)
+    if (on) setRelaxOk(true)
+  }, [])
 
   // add/remove a keepouts zone (road/rack drawn on canvas, or any other) —
   // changing `data` here re-triggers the scoreLayout effect below, since a
@@ -406,7 +422,7 @@ function App() {
         rackWidth={rackWidth} setRackWidth={setRackWidth}
         rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
         roadWidth={roadWidth} setRoadWidth={setRoadWidth}
-        realtimeMode={realtimeMode} setRealtimeMode={setRealtimeMode}
+        realtimeMode={realtimeMode} setRealtimeMode={toggleRealtimeMode}
       />
 
       <main className="canvas-area">
@@ -442,7 +458,7 @@ function App() {
       <StatusBar
         projectLabel={fileName ?? data.name ?? 'untitled'} score={score} cursor={cursor}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
-        tool={tool} realtimeMode={realtimeMode}
+        tool={tool} realtimeMode={realtimeMode} relaxOk={relaxOk}
       />
     </div>
   )
