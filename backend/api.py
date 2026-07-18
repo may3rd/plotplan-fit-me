@@ -28,6 +28,7 @@ from plotplan import (
     feasible,
     load_unit,
     piping_cost,
+    push_repair,
     solve,
     solve_one,
     write_dxf,
@@ -160,18 +161,20 @@ def relax(req: RelaxRequest):
     random_place) so a drag reads as a live nudge, not a fresh solve.
     Stateless like /score: nothing persists between calls, the frontend
     re-posts the whole current layout each time.
-    ponytail: if the dragged position is already infeasible against
-    neighbors, this returns {feasible: false} with positions unchanged
-    rather than attempting to reflow around an infeasible pin — item 17
-    adds a push-repair pass here for the common "dropped into a packed
-    row" case instead of just reporting failure."""
+    If the dragged position violates spacing against a neighbor, item 17's
+    push_repair() first legalizes by shoving movable neighbors aside
+    (capped iteration count) — the common "dropped into a packed row"
+    case — before the SA refine runs. If push_repair can't legalize within
+    its cap (or the drop is infeasible for a reason it doesn't attempt to
+    fix, e.g. landing in a keepout zone), this returns {feasible: false}
+    honestly rather than looping further or trusting a broken layout."""
     eq, conns, spacing, site, keepouts = _build_case(req.data)
     by_tag = {e.tag: e for e in eq}
     if req.tag not in by_tag:
         raise HTTPException(404, f"unknown equipment tag: {req.tag}")
     dragged = by_tag[req.tag]
     dragged.x, dragged.y, dragged.pinned = req.x, req.y, True
-    if not feasible(eq, site, spacing, keepouts):
+    if not feasible(eq, site, spacing, keepouts) and not push_repair(eq, site, spacing, keepouts):
         return {"feasible": False, "cost": None, "equipment": [asdict(e) for e in eq]}
     cost = solve(eq, conns, site, spacing, keepouts, seed=0, iters=req.iters, t0=req.t0, warm_start=True)
     return {"feasible": True, "cost": cost, "equipment": [asdict(e) for e in eq]}

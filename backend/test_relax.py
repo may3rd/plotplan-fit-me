@@ -1,6 +1,6 @@
-"""Self-check for POST /api/relax (PLAN.md item 16): calls the endpoint
+"""Self-check for POST /api/relax (PLAN.md items 16-17): calls the endpoint
 function directly (no HTTP layer, no test-only dependency needed for it).
-Uses a hand-built, deterministic layout rather than one produced by
+Uses hand-built, deterministic layouts rather than ones produced by
 solve_one() — relax() only ever calls solve()/warm_start directly, never
 solve_cpsat(), so there's no reason to route this test through CP-SAT's
 own (documented, non-deterministic-across-runs) parallel search just to
@@ -63,10 +63,44 @@ def test_open_space_drag():
     print(f"OK: open-space drag reflowed and passed _check() in {dt_ms:.0f}ms at N={len(case['equipment'])}")
 
 
-def test_infeasible_drop_reported_honestly():
-    """Dropping directly on top of another item is infeasible (item 16
-    alone has no push-repair yet — that's item 17) — must come back as a
-    clean {feasible: False}, not raise."""
+def test_packed_row_drag_legalizes():
+    """PLAN.md item 17: dropping onto (deeply overlapping, not just too
+    close to) a packed-row neighbor must be legalized by push_repair
+    shoving that neighbor aside, not just reported as a flat failure.
+    R-1 sits between R-0 and R-2 along x (a real packed row), so the
+    escape route push_repair should find is perpendicular — nudge R-1 out
+    of the row along y, into the open space above/below it, rather than
+    sideways into a third item (the greedy single-axis heuristic doesn't
+    plan multi-item cascades; the drag offset here is along y precisely so
+    the minimum-push axis it picks is the unobstructed one)."""
+    site = {"w": 60.0, "d": 20.0, "wind_dir": ""}
+    equipment = [
+        {"tag": "R-0", "cls": "vessel", "w": 4, "d": 4, "x": 5, "y": 10},
+        {"tag": "R-1", "cls": "vessel", "w": 4, "d": 4, "x": 13, "y": 10},
+        {"tag": "R-2", "cls": "vessel", "w": 4, "d": 4, "x": 21, "y": 10},
+        {"tag": "DRAG", "cls": "vessel", "w": 4, "d": 4, "x": 45, "y": 10},
+    ]
+    case = {"name": "packed_row", "equipment": equipment, "connections": [],
+            "site": site, "keepouts": {}, "spacing": SPACING}
+    # drop DRAG almost exactly on R-1 (0.5m off in y only — deep overlap,
+    # not exactly concentric, and offset along the axis with open room)
+    req = api.RelaxRequest(data=api.CaseData(**case), tag="DRAG", x=13.0, y=10.5)
+    result = api.relax(req)
+    assert result["feasible"], f"push_repair should have legalized this packed-row drop: {result}"
+    eq, conns, spacing, site_obj, keepouts = api._build_case(api.CaseData(**case))
+    out_eq = [p.Equipment(**e) for e in result["equipment"]]
+    p._check(out_eq, site_obj, spacing, keepouts)
+    by_tag = {e.tag: e for e in out_eq}
+    assert (by_tag["DRAG"].x, by_tag["DRAG"].y) == (13.0, 10.5), \
+        "dragged item must still land exactly at the requested cursor position"
+    print("OK: packed-row drop legalized by push_repair and passed _check()")
+
+
+def test_concentric_drop_reported_infeasible():
+    """Dropping exactly on top of another item's center is a degenerate
+    case even push_repair can't fix (no push direction is defined for two
+    exactly-concentric rectangles) — must still come back as a clean
+    {feasible: False}, not raise or loop forever."""
     case = _grid_case(n_cols=2, n_rows=1)
     case.pop("_grid_max")
     v0, v1 = case["equipment"]
@@ -74,9 +108,10 @@ def test_infeasible_drop_reported_honestly():
     result = api.relax(req)
     assert result["feasible"] is False and result["cost"] is None, \
         f"expected an honest infeasible report, got: {result}"
-    print("OK: infeasible drop reported honestly (no exception, no fake success)")
+    print("OK: concentric drop reported infeasible honestly (no exception, no fake success)")
 
 
 if __name__ == "__main__":
     test_open_space_drag()
-    test_infeasible_drop_reported_honestly()
+    test_packed_row_drag_legalizes()
+    test_concentric_drop_reported_infeasible()

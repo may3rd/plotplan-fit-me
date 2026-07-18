@@ -771,6 +771,83 @@ def solve_one(eq: list, conns: list, site: Site, spacing: dict = None, keepouts:
     solve_cpsat(eq, conns, site, spacing, keepouts, seed=seed)
     return solve(eq, conns, site, spacing, keepouts, seed=seed, on_progress=on_progress, warm_start=True)
 
+# ------------------------------------------------- Mode 2 push-repair (item 17)
+
+def _push_vector(mover: Equipment, other: Equipment, min_gap_needed: float, eps: float = 1e-6):
+    """Minimum-magnitude single-axis translation for `mover`, directly away
+    from `other`, that clears min_gap_needed under edge_gap()'s "excess
+    beyond half-widths, combined via hypot" formula — picks whichever axis
+    (x or y) needs less added movement (the "axis of smallest overlap"
+    item 17 calls for) and returns (dx, dy) to add to mover.x/mover.y
+    (exactly one of the two is nonzero). None if mover and other are
+    exactly concentric — no push direction is defined, a dead end for this
+    heuristic (push_repair reports failure rather than guessing)."""
+    dx_c, dy_c = mover.x - other.x, mover.y - other.y
+    if dx_c == 0.0 and dy_c == 0.0:
+        return None
+    half_x, half_y = (mover.w + other.w) / 2, (mover.d + other.d) / 2
+    cur_ex = max(0.0, abs(dx_c) - half_x)   # current clearance already banked along x
+    cur_ey = max(0.0, abs(dy_c) - half_y)   # ... along y
+    need_ex = math.sqrt(max(0.0, min_gap_needed ** 2 - cur_ey ** 2))  # x excess needed if y stays put
+    need_ey = math.sqrt(max(0.0, min_gap_needed ** 2 - cur_ex ** 2))  # y excess needed if x stays put
+    # excess is max(0, |center distance| - half-width-sum) — pinned at 0
+    # while footprints still overlap (|center distance| < half-width-sum),
+    # so the raw coordinate distance needed to REACH a target excess is
+    # half-width-sum + that excess, not the excess amount itself; using
+    # the excess directly as a move distance would undershoot by exactly
+    # the overlap depth whenever footprints deeply overlap (the common
+    # "dropped on top of a neighbor" case this exists for).
+    move_x = max(0.0, (half_x + need_ex) - abs(dx_c))
+    move_y = max(0.0, (half_y + need_ey) - abs(dy_c))
+    sx = 1.0 if dx_c >= 0 else -1.0
+    sy = 1.0 if dy_c >= 0 else -1.0
+    if move_x <= move_y:
+        return sx * (move_x + eps), 0.0
+    return 0.0, sy * (move_y + eps)
+
+def push_repair(eq: list, site: Site, spacing: dict, keepouts: dict = None, cap: int = 50) -> bool:
+    """Legalize a just-dragged (pinned) item's position by translating
+    other MOVABLE items out of the way — and out of each other's way, if
+    one push cascades into a new conflict — before /api/relax hands off to
+    item 16's warm-start SA refine. Loop up to `cap` times: find the worst
+    (largest deficit) pairwise SPACING violation with at least one movable
+    side, push that side by _push_vector()'s minimum single-axis
+    translation (clamped to site bounds), repeat. Mutates eq in place.
+    Returns True once the layout is fully feasible(), False if `cap` was
+    hit first — the caller must check this and report infeasible honestly
+    rather than trust a partially-repaired layout.
+    ponytail: the worst-violation search re-scans every pair from scratch
+    each iteration (cheap at this tool's item counts — cap * N² edge_gap
+    calls, not the bottleneck _move_feasible optimizes for in solve()'s SA
+    loop) rather than tracking deltas, so the "is the whole layout
+    feasible now" question always has one obviously-correct answer instead
+    of relying on an incremental invariant. Only resolves pairwise
+    equipment-spacing deficits — a push that would need to route around a
+    keepout/rack zone shape, or that lands in someone's pull/wind
+    rectangle, is a different geometry problem this heuristic doesn't
+    attempt; the final feasible() check catches that and reports failure
+    rather than silently accepting a still-broken layout."""
+    for _ in range(cap):
+        worst = None  # (deficit, a, b)
+        for i in range(len(eq)):
+            for j in range(i + 1, len(eq)):
+                a, b = eq[i], eq[j]
+                if a.pinned and b.pinned:
+                    continue  # neither side can move — not repairable by translation
+                deficit = min_gap(a.cls, b.cls, spacing) - edge_gap(a, b)
+                if deficit > 1e-9 and (worst is None or deficit > worst[0]):
+                    worst = (deficit, a, b)
+        if worst is None:
+            return feasible(eq, site, spacing, keepouts)
+        _, a, b = worst
+        mover, other = (a, b) if not a.pinned else (b, a)
+        vec = _push_vector(mover, other, min_gap(mover.cls, other.cls, spacing))
+        if vec is None:
+            return False
+        mover.x = min(max(mover.x + vec[0], mover.w / 2), site.w - mover.w / 2)
+        mover.y = min(max(mover.y + vec[1], mover.d / 2), site.d - mover.d / 2)
+    return feasible(eq, site, spacing, keepouts)
+
 # --------------------------------------------------------------- DXF writer
 # ponytail: hand-rolled DXF R12 (plain text) — ezdxf not needed for lines+text.
 

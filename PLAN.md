@@ -291,16 +291,34 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     cleanly, no exception. Not built yet: the frontend drag-debounce/
     live-preview wiring (`PlotCanvas.jsx`) — this item is backend-only,
     matching how item 10's initial score-on-drag landed backend-first too.
-17. `[ ]` **Push-repair before relax** — when the dragged position
-    violates spacing against neighbors, `/relax` first legalizes: loop
-    (cap ~50 iterations) find the worst violation involving a movable
-    item, translate that item along the shortest vector that clears the
-    gap (axis of smallest overlap + required clearance), re-check,
-    repeat; then run the short SA of item 16. Pure stdlib geometry, no
-    physics engine. Reuses `edge_gap`/`min_gap`/`_move_feasible`. Verify:
-    drag test where an item is dropped into a packed row and the row opens
-    up feasibly; cap reached → return infeasible flag honestly instead of
-    looping.
+17. `[x]` **Push-repair before relax** — new `push_repair(eq, site,
+    spacing, keepouts, cap=50)` in `plotplan.py`: loop up to `cap` times,
+    find the worst (largest deficit) pairwise spacing violation with at
+    least one movable side, translate that side by `_push_vector()`'s
+    minimum single-axis translation (clamped to site bounds), repeat;
+    returns `True` once fully `feasible()`, `False` if the cap is hit
+    first. `api.py`'s `/api/relax` calls it when the freshly-pinned drag
+    position is infeasible, before the item-16 SA refine. Pure stdlib
+    geometry — reuses `edge_gap`/`min_gap`/`feasible`, not `_move_feasible`
+    (considered it per the original plan text, but the loop's "are we
+    done" question always has one unambiguous answer via a full
+    `feasible()` scan at cheap item counts, so introducing an incremental
+    per-move check would've added a real correctness trap — see
+    `push_repair`'s docstring — for no benefit at this scale). One real
+    bug caught and fixed during implementation: `_push_vector()`'s first
+    draft used the *needed excess* itself as the push distance, which
+    silently undershoots by exactly the overlap depth whenever two
+    footprints deeply overlap (the "dropped right on top of a neighbor"
+    case this exists for) — fixed to push to the *target absolute center
+    distance* (half-width-sum + needed excess) instead. Verified in
+    `test_relax.py`: a 3-item row (R-0/R-1/R-2) with a 4th item dropped
+    almost exactly onto R-1 (offset along the axis with open room, not
+    into R-0/R-2 — the greedy single-axis heuristic doesn't plan
+    multi-item cascades, so the test targets a scenario within its actual
+    capability, not an arbitrarily hard rearrangement) legalizes and
+    passes `_check()`; a drop exactly concentric with another item (no
+    push direction is mathematically defined) reports `{feasible: False}`
+    honestly rather than looping or raising.
 18. `[~]` **Anytime progress streaming** — partially done. `solve()`
     already takes `on_progress(fraction)` (`plotplan.py:378-379`, fired
     ~100x per run via throttled `prog_step`) and `POST /api/solve`
