@@ -31,6 +31,11 @@ const SOFT_SNAP_M = 1.0 // soft-snap to the site border when a dragged point is 
 // allow (see roundedPolygonPath).
 const ROAD_INNER_RADIUS_M = 8
 const RACK_COLUMN_SIZE = 1.0 // meters, side length of the tiny column marker square
+// A zone-draw press+release with less movement than this (world meters)
+// counts as a tap, not a drag, and inserts a sensible default shape instead
+// of whatever near-zero-size shape the exact pointer positions would give.
+const DRAW_TAP_THRESHOLD_M = 0.5
+const DEFAULT_RECT_ZONE_SIZE_M = 10 // tap-to-insert size for maint/underground/keep-out (10m square, centered on the click)
 
 // engineering-drawing dimension offsets (all in world meters)
 const DIM_OFFSET = 3.0  // dimension line offset from the zone edge
@@ -50,13 +55,19 @@ function softBorder(val, low, high) {
 // tool -> the zone-name prefix it draws (see backend plotplan._rack_zones /
 // _zone_layer — a zone's name prefix is the only thing that decides its
 // role/layer; "RACK"/"ROAD"/"MAINT" mirror that same convention, while
-// "UNDERGROUND"/"KEEPOUT" stay generic keep-out zones).
+// "UNDERGROUND"/"KEEPOUT" stay generic keep-out zones). `shape` picks the
+// draw interaction, both a press-drag-release gesture with a tap shortcut:
+// 'centerline' (drag a start/end line, given a width) for roads/racks where
+// direction and width both matter — a plain tap drops a full-site-width
+// horizontal line at that point; 'rect' (drag two opposite corners) for
+// area-only zones with no meaningful direction — a tap drops a fixed-size
+// square centered on the click (see DEFAULT_RECT_ZONE_SIZE_M).
 const DRAW_KINDS = {
-  road: { prefix: 'ROAD', label: 'Road' },
-  rack: { prefix: 'RACK', label: 'Pipe Rack' },
-  maint: { prefix: 'MAINT', label: 'Maintenance' },
-  underground: { prefix: 'UNDERGROUND', label: 'Underground' },
-  keepout: { prefix: 'KEEPOUT', label: 'Keep-out' },
+  road: { prefix: 'ROAD', label: 'Road', shape: 'centerline' },
+  rack: { prefix: 'RACK', label: 'Pipe Rack', shape: 'centerline' },
+  maint: { prefix: 'MAINT', label: 'Maintenance', shape: 'rect' },
+  underground: { prefix: 'UNDERGROUND', label: 'Underground', shape: 'rect' },
+  keepout: { prefix: 'KEEPOUT', label: 'Keep-out', shape: 'rect' },
 }
 const DRAW_PREFIX = Object.fromEntries(
   Object.entries(DRAW_KINDS).map(([k, v]) => [`draw-${k}`, v.prefix]),
@@ -126,9 +137,9 @@ function rackHatchSegments(poly, spacing) {
 }
 
 // Build a zone rectangle from a centerline (start->end) and a width — used
-// for both roads and pipe racks (same two-click draw interaction, see
-// DRAW_PREFIX): it runs along the centerline and is `width` wide, split
-// equally to either side. Returns [[x,y]...] in world coords.
+// for roads and pipe racks (DRAW_KINDS shape: 'centerline'): it runs along
+// the centerline and is `width` wide, split equally to either side. Returns
+// [[x,y]...] in world coords.
 function centerlineRect(start, end, width) {
   const dx = end[0] - start[0]
   const dy = end[1] - start[1]
@@ -141,6 +152,17 @@ function centerlineRect(start, end, width) {
     [end[0] - ox, end[1] - oy],
     [start[0] - ox, start[1] - oy],
   ]
+}
+
+// Build a zone rectangle directly from two opposite corners — used for
+// maintenance/underground/keep-out zones (DRAW_KINDS shape: 'rect'), which
+// have no meaningful direction the way a road/rack centerline does.
+function rectFromCorners(a, b) {
+  const minX = Math.min(a[0], b[0])
+  const maxX = Math.max(a[0], b[0])
+  const minY = Math.min(a[1], b[1])
+  const maxY = Math.max(a[1], b[1])
+  return [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]]
 }
 
 function zoneBBox(poly) {
@@ -381,20 +403,15 @@ export default function PlotCanvas({
     return m
   }, [roadClusters])
 
-  // roads and pipe racks share the exact same two-click centerline+width
-  // draw interaction (see DRAW_PREFIX) — only the width preference, zone
-  // name prefix, and rendered style (hatch/label/color) differ per kind.
+  // roads and pipe racks share the same two-click centerline+width draw
+  // interaction (see DRAW_PREFIX); maintenance/underground/keep-out draw as
+  // a plain two-corner rectangle instead (DRAW_KINDS shape: 'rect') and have
+  // no width setting at all. Only rack/road ever read/write drawWidth.
   const drawKind = tool.startsWith('draw-') ? tool.slice(5) : null
   const drawDef = drawKind ? DRAW_KINDS[drawKind] : null
-  // roads and pipe racks remember their width in App prefs (rackWidth/
-  // roadWidth); other zone kinds keep a local default width.
-  const [otherWidth, setOtherWidth] = useState(8)
-  const drawWidth = drawKind === 'rack' ? rackWidth
-    : drawKind === 'road' ? roadWidth
-    : otherWidth
-  const setDrawWidth = drawKind === 'rack' ? setRackWidth
-    : drawKind === 'road' ? setRoadWidth
-    : setOtherWidth
+  const isRectDraw = drawDef?.shape === 'rect'
+  const drawWidth = drawKind === 'rack' ? rackWidth : roadWidth
+  const setDrawWidth = drawKind === 'rack' ? setRackWidth : setRoadWidth
 
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
@@ -405,12 +422,12 @@ export default function PlotCanvas({
   const drawStart = useRef(null) // {x, y} world point where a zone-draw drag began
   const [measure, setMeasure] = useState(null) // live closest-neighbor readout while dragging
   const [zoneDim, setZoneDim] = useState(null) // {w, h, cx, cy} live width×height while resizing a zone
-  const [drawRect, setDrawRect] = useState(null) // live two-click centerline preview {x1,y1,x2,y2}
+  const [drawRect, setDrawRect] = useState(null) // live press-drag-release preview {x1,y1,x2,y2}
   const [dragVert, setDragVert] = useState(null) // {zone, index} | {zone, edge} while dragging a vertex/edge handle
   const [editOpen, setEditOpen] = useState(false) // zone rename/role dialog
   const [drawPromptOpen, setDrawPromptOpen] = useState(false)
   const [drawPromptVal, setDrawPromptVal] = useState(String(drawWidth))
-  const [zoneDrawing, setZoneDrawing] = useState(false) // true between the first and second click
+  const [zoneDrawing, setZoneDrawing] = useState(false) // true while a zone-draw press-drag-release is in progress
 
   // view is null for the first frame (until App computes the fit off the
   // reported size). Keep the DOM structure STABLE across that transition —
@@ -488,9 +505,10 @@ export default function PlotCanvas({
   // which opens the width prompt (default rackWidth/roadWidth, later from
   // preferences). Opening is driven by that explicit trigger so the dialog
   // can't reopen unexpectedly and so re-clicking the (already-active)
-  // button re-opens it.
+  // button re-opens it. Rect-shape kinds have no width to prompt for — the
+  // canvas is ready for the first corner click immediately.
   useEffect(() => {
-    if (!drawKind) return
+    if (!drawKind || isRectDraw) return
     setDrawPromptVal(String(drawWidth))
     setDrawPromptOpen(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -511,8 +529,8 @@ export default function PlotCanvas({
     setDrawPromptOpen(false)
   }
 
-  // Esc cancels an in-progress road/rack draw (between the first and second
-  // click) — but never while the width prompt dialog is open.
+  // Esc cancels an in-progress zone draw (mid press-drag-release) — but
+  // never while the width prompt dialog is open.
   useEffect(() => {
     if (!zoneDrawing || drawPromptOpen) return
     const onKeyDown = (e) => {
@@ -541,27 +559,15 @@ export default function PlotCanvas({
       return
     }
     if (DRAW_PREFIX[tool]) {
-      // two-click mode, shared by roads and pipe racks: first click sets
-      // the centerline start; second click sets the end and commits the
-      // zone. No pointer capture (unlike a drag tool) so the second
-      // discrete click arrives normally.
+      // press-drag-release mode: press sets the start point, dragging
+      // previews a custom shape, release commits it (see onPointerUp) — a
+      // plain tap with no real movement commits a default shape instead.
       const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
       const w = { x: p.x, y: site.d - p.y }
-      if (!drawStart.current) {
-        drawStart.current = w
-        setDrawRect({ x1: w.x, y1: w.y, x2: w.x, y2: w.y })
-        setZoneDrawing(true)
-      } else {
-        const start = [drawStart.current.x, drawStart.current.y]
-        const end = snapAxisAligned(start, [w.x, w.y])
-        const poly = centerlineRect(start, end, drawWidth)
-        const name = nextZoneName(keepouts, DRAW_PREFIX[tool])
-        onAddZone(name, poly)
-        drawStart.current = null
-        setDrawRect(null)
-        setZoneDrawing(false)
-        setTool('select') // one shot: back to Select after placing a zone
-      }
+      drawStart.current = w
+      setDrawRect({ x1: w.x, y1: w.y, x2: w.x, y2: w.y })
+      setZoneDrawing(true)
+      capture(ev)
       return
     }
     if (tool === 'select' || tool === 'edit') setSelectedZone(null)
@@ -703,13 +709,25 @@ export default function PlotCanvas({
       return
     }
     if (drawStart.current) {
-      // keep the start fixed; the cursor drives the centerline end (snapped
-      // to the nearer axis) so the ghost width preview follows the pointer —
-      // same for roads and pipe racks.
+      // keep the start fixed; the cursor drives the other point so the ghost
+      // preview follows the pointer — a free corner for rect shapes, snapped
+      // to the nearer axis for a road/rack centerline.
       const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
       const wy = site.d - p.y
-      const [ex, ey] = snapAxisAligned([drawStart.current.x, drawStart.current.y], [p.x, wy])
+      const [ex, ey] = isRectDraw
+        ? [p.x, wy]
+        : snapAxisAligned([drawStart.current.x, drawStart.current.y], [p.x, wy])
       setDrawRect({ x1: drawStart.current.x, y1: drawStart.current.y, x2: ex, y2: ey })
+      // rect zones get the same engineering-dimension guide shown while
+      // resizing an existing zone — road/rack don't (see zoneDim render).
+      if (isRectDraw) {
+        setZoneDim({
+          w: Math.abs(ex - drawStart.current.x),
+          h: Math.abs(ey - drawStart.current.y),
+          cx: (drawStart.current.x + ex) / 2,
+          cy: (drawStart.current.y + ey) / 2,
+        })
+      }
       return
     }
     const tag = dragTag.current
@@ -727,15 +745,39 @@ export default function PlotCanvas({
     setMeasure(pair && { ...pair, tag })
   }
 
-  function onPointerUp() {
+  function onPointerUp(ev) {
     pan.current = null
     dragTag.current = null
     dragZone.current = null
     setDragVert(null)
     setMeasure(null)
     setZoneDim(null)
-    // A road/rack draw is committed by the second click (onPointerDownBg),
-    // not by releasing the pointer — nothing else to do here.
+
+    if (drawStart.current) {
+      const start = drawStart.current
+      const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+      const end = { x: p.x, y: site.d - p.y }
+      const isTap = Math.hypot(end.x - start.x, end.y - start.y) < DRAW_TAP_THRESHOLD_M
+      let poly
+      if (isRectDraw) {
+        const half = DEFAULT_RECT_ZONE_SIZE_M / 2
+        poly = isTap
+          ? rectFromCorners([start.x - half, start.y - half], [start.x + half, start.y + half])
+          : rectFromCorners([start.x, start.y], [end.x, end.y])
+      } else if (isTap) {
+        // quick-add: a centerline spanning the full site width, horizontal,
+        // at the click's y.
+        poly = centerlineRect([0, start.y], [site.w, start.y], drawWidth)
+      } else {
+        poly = centerlineRect([start.x, start.y], snapAxisAligned([start.x, start.y], [end.x, end.y]), drawWidth)
+      }
+      const name = nextZoneName(keepouts, DRAW_PREFIX[tool])
+      onAddZone(name, poly)
+      drawStart.current = null
+      setDrawRect(null)
+      setZoneDrawing(false)
+      setTool('select') // one shot: back to Select after placing a zone
+    }
   }
 
   function onDoubleClickZone(zone, ev) {
@@ -1046,7 +1088,7 @@ export default function PlotCanvas({
             // ghost the zone exactly like a committed one (fill + label,
             // hatch too if it's a rack), just at reduced opacity, so the
             // user sees the final shape while placing the second point.
-            const poly = centerlineRect(a, b, drawWidth)
+            const poly = isRectDraw ? rectFromCorners(a, b) : centerlineRect(a, b, drawWidth)
             const [cx, cy] = centroid(poly)
             const hatch = drawKind === 'rack' ? rackHatchSegments(poly, RACK_HATCH_SPACING) : []
             return (

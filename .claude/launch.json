@@ -5,7 +5,8 @@
       "name": "backend",
       "runtimeExecutable": "/Users/maetee/Code/plotplan-fit-me/backend/.venv/bin/uvicorn",
       "runtimeArgs": ["api:app", "--reload", "--port", "8000", "--app-dir", "/Users/maetee/Code/plotplan-fit-me/backend"],
-      "port": 8000
+      "port": 8000,
+      "autoPort": false
     },
     {
       "name": "frontend",

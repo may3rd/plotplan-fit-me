@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Loader2, Magnet,
-  MousePointer2, Pencil, Play, Rows3, Route, Ruler, Save, Search, Trash2,
+  MousePointer2, Pencil, Play, Ruler, Save, Search, Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -265,31 +265,31 @@ export default function Ribbon(props) {
               variant={tool === 'draw-road' ? 'default' : 'outline'} size="icon"
               onClick={() => { setTool('draw-road'); bumpDrawPrompt() }} title="Draw road"
             >
-              <Route />
+              <span className="font-bold">R</span>
             </Button>
             <Button
               variant={tool === 'draw-rack' ? 'default' : 'outline'} size="icon"
               onClick={() => { setTool('draw-rack'); bumpDrawPrompt() }} title="Draw pipe rack"
             >
-              <Rows3 />
+              <span className="font-bold">P</span>
             </Button>
             <Button
               variant={tool === 'draw-maint' ? 'default' : 'outline'} size="icon"
               onClick={() => { setTool('draw-maint'); bumpDrawPrompt() }} title="Draw maintenance corridor"
             >
-              <Route />
+              <span className="font-bold">M</span>
             </Button>
             <Button
               variant={tool === 'draw-underground' ? 'default' : 'outline'} size="icon"
               onClick={() => { setTool('draw-underground'); bumpDrawPrompt() }} title="Draw underground keep-out"
             >
-              <Route />
+              <span className="font-bold">U</span>
             </Button>
             <Button
               variant={tool === 'draw-keepout' ? 'default' : 'outline'} size="icon"
               onClick={() => { setTool('draw-keepout'); bumpDrawPrompt() }} title="Draw keep-out zone"
             >
-              <Route />
+              <span className="font-bold">K</span>
             </Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
