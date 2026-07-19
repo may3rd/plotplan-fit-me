@@ -427,3 +427,12 @@ list) or a real saving (the pitch for the whole tool). Item 10 shipped ahead
 of this checkpoint (the user chose to unblock it explicitly), so this is
 still worth doing — it's the only way to know if items 5–9 are the right
 five, independent of the web UI now existing.
+
+`backend/validate_unit.py` is the harness for this — give it a unit folder
+whose `equipment.csv` has every row `pinned=true` at its real as-built
+position and it sorts the disagreement into one of three buckets (missing
+constraint / real saving / already near-optimal) with a per-equipment
+displacement table. The only remaining step is pointing it at a real unit's
+CSVs — the tooling itself is done and sanity-checks end-to-end on
+`sample_unit` (which reports bucket (a) as expected, since it pins just one
+item). See `backend/HELP.md` use case 7.

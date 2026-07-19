@@ -460,11 +460,26 @@
   cursor: crosshair;
 }
 
-/* Drag-to-zoom mode: magnifying-glass-with-plus cursor (browser-native
-   `zoom-in`), and the rubber-band selection rectangle drawn as an
-   absolutely-positioned div overlay in screen px (no SVG coord math). */
+/* Drag-to-zoom mode: magnifying-glass cursor while hovering (idle), but a
+   crosshair while actively dragging the rubber-band rectangle so the user
+   sees the tool is in a "drawing" state, not resting — matches every map
+   viewer's drag-to-zoom cursor swap. */
 .plot[data-tool='zoom'] {
   cursor: zoom-in;
+}
+/* In zoom mode every element under the canvas (zones, equipment, handles)
+   must keep the zoom cursor — without this, the more-specific `.zone` /
+   `.equip` cursor rules win on those elements and flip back to a pointer,
+   breaking the "magnifier everywhere" affordance of the tool. */
+.plot[data-tool='zoom'] .zone,
+.plot[data-tool='zoom'] .equip,
+.plot[data-tool='zoom'] .zone-vert,
+.plot[data-tool='zoom'] .zone-edge,
+.plot[data-tool='zoom'] .tag {
+  cursor: inherit;
+}
+.plot[data-tool='zoom']:active {
+  cursor: crosshair;
 }
 
 .zoom-rect {

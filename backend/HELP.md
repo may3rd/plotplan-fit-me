@@ -348,3 +348,39 @@ total_pipe_length_m,,,,197.08
   moving anything. Fix the pin coordinates.
 - Any `KeyError` on a CSV column name means a required column is missing or
   misspelled — check the tables above.
+
+## Use case 7: validate against a real as-built plot plan
+
+`validate_unit.py` is the validation-checkpoint harness (PLAN.md's
+outstanding item). It takes a normal unit folder whose `equipment.csv` has
+every row `pinned=true` at its real as-built position — that makes the
+loaded layout the as-built itself — then re-solves the same unit with all
+pins dropped so the solver is free to find its own layout, and reports
+where they disagree.
+
+```
+python validate_unit.py data/my_real_unit        # seeds 0:16
+python validate_unit.py data/my_real_unit 0:32   # more seeds for a bigger unit
+```
+
+It sorts the disagreement into one of three buckets:
+
+- **(a) as-built INFEASIBLE under our model** — a missing or wrong
+  constraint. The harness lists every violation (out of bounds, gap
+  shortfalls, keepout/pull/wind overlaps). Add the constraint to PLAN.md's
+  optional-later list; don't trust any "saving" the solver reports until
+  the as-built is feasible.
+- **(b) as-built feasible, solver BEATS it on modeled cost** — a real
+  saving under the constraints we have (the whole tool's pitch), OR a
+  constraint the as-built respected that we don't model (cross-check
+  against bucket (a): if the as-built was feasible, the saving is genuine
+  under what we currently enforce).
+- **(c) solver can't beat the as-built** — the model is fine for this unit;
+  the as-built was already near-optimal under our constraints.
+
+A per-equipment displacement table (as-built center → solver center, in
+meters) follows, so you can see exactly which items the solver would move
+and how far. Running it on `sample_unit` only sanity-checks the harness —
+`sample_unit` pins just one item, so its "as-built" is the default (0, 0)
+stack and always reports bucket (a). Point it at a real unit's CSVs for a
+meaningful check.
