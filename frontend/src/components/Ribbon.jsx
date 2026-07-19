@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Magnet,
   MousePointer2, Palette, Pause, Pencil, Play, Redo2, RotateCw, Ruler, Save, Search,
-  Settings as SettingsIcon, Trash2, Undo2, Zap,
+  Settings as SettingsIcon, Trash2, Undo2, Zap, ZoomIn,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -281,6 +281,7 @@ export default function Ribbon(props) {
     tool, setTool, bumpDrawPrompt, fit, zoomPct, setZoomPercent,
     bumpEditPrompt, selectedZone, deleteZone,
     selectedEquip, rotateEquipment, rotateZone, bumpEditEquipPrompt, removeEquipment,
+    selectedEquips,
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
     theme, setTheme,
     rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth,
@@ -436,6 +437,14 @@ export default function Ribbon(props) {
           <Group label="Zoom">
             <ZoomDialog zoomPct={zoomPct} setZoomPercent={setZoomPercent} />
             <Button variant="outline" size="icon" onClick={fit} title="Fit width" aria-label="Fit width"><ArrowLeftRight /></Button>
+            <Toggle
+              variant="outline" pressed={tool === 'zoom'}
+              onPressedChange={(p) => setTool(p ? 'zoom' : 'select')}
+              title="Drag to zoom — drag a rectangle to zoom in, click to zoom in 2x"
+              aria-label="Drag to zoom"
+            >
+              <ZoomIn />
+            </Toggle>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Solve">
@@ -550,16 +559,17 @@ export default function Ribbon(props) {
         {/* same pattern as the Zone tab above, for a selected equipment. */}
         {selectedEquip && (
           <TabsContent value="object" className="ribbon-body">
-            <Group label="Selected object">
+            <Group label={selectedEquips.length > 1 ? `Selected objects (${selectedEquips.length})` : 'Selected object'}>
               <Button
                 variant="outline" size="icon"
                 onClick={() => bumpEditEquipPrompt()} title="Edit selected object" aria-label="Edit selected object"
+                disabled={selectedEquips.length > 1}
               >
                 <Pencil />
               </Button>
               <Button
                 variant="outline" size="icon"
-                onClick={() => removeEquipment(selectedEquip)} title="Remove selected object" aria-label="Remove selected object"
+                onClick={() => removeEquipment(selectedEquips)} title="Remove selected object(s)" aria-label="Remove selected object(s)"
               >
                 <Trash2 />
               </Button>
@@ -568,13 +578,13 @@ export default function Ribbon(props) {
             <Group label="Rotate">
               <Button
                 variant="outline" size="icon"
-                onClick={() => rotateEquipment(selectedEquip, 90)} title="Rotate selected equipment 90° CW" aria-label="Rotate selected equipment 90° CW"
+                onClick={() => rotateEquipment(selectedEquips, 90)} title="Rotate selected equipment 90° CW" aria-label="Rotate selected equipment 90° CW"
               >
                 <RotateCw />
               </Button>
               <Button
                 variant="outline" size="icon"
-                onClick={() => rotateEquipment(selectedEquip, 270)} title="Rotate selected equipment 270° CW (90° CCW)" aria-label="Rotate selected equipment 270° CW (90° CCW)"
+                onClick={() => rotateEquipment(selectedEquips, 270)} title="Rotate selected equipment 270° CW (90° CCW)" aria-label="Rotate selected equipment 270° CW (90° CCW)"
               >
                 <RotateCw className="-scale-x-100" />
               </Button>
@@ -586,6 +596,14 @@ export default function Ribbon(props) {
           <Group label="Zoom">
             <ZoomDialog zoomPct={zoomPct} setZoomPercent={setZoomPercent} />
             <Button variant="outline" size="icon" onClick={fit} title="Fit width" aria-label="Fit width"><ArrowLeftRight /></Button>
+            <Toggle
+              variant="outline" pressed={tool === 'zoom'}
+              onPressedChange={(p) => setTool(p ? 'zoom' : 'select')}
+              title="Drag to zoom — drag a rectangle to zoom in, click to zoom in 2x"
+              aria-label="Drag to zoom"
+            >
+              <ZoomIn />
+            </Toggle>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="View mode">
@@ -633,6 +651,7 @@ export default function Ribbon(props) {
             >
               <ToggleGroupItem value="select" title="Select / drag" aria-label="Select / drag"><MousePointer2 /></ToggleGroupItem>
               <ToggleGroupItem value="pan" title="Pan" aria-label="Pan"><Hand /></ToggleGroupItem>
+              <ToggleGroupItem value="edit" title="Edit — drag roads, pipe racks, and other zones to move them" aria-label="Edit zones"><Pencil /></ToggleGroupItem>
             </ToggleGroup>
           </Group>
         </TabsContent>

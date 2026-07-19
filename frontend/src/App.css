@@ -334,6 +334,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  position: relative; /* anchor the absolute overlay divs (.zoom-rect / .marquee-rect) to THIS box, not to .canvas-area — their screen-px coords are measured against wrapRef (= this), so without this the rulers' 26px offset shifts them. */
 }
 
 /* ---- status bar --------------------------------------------------------- */
@@ -457,6 +458,30 @@
 .plot[data-tool='draw-road'],
 .plot[data-tool='draw-rack'] {
   cursor: crosshair;
+}
+
+/* Drag-to-zoom mode: magnifying-glass-with-plus cursor (browser-native
+   `zoom-in`), and the rubber-band selection rectangle drawn as an
+   absolutely-positioned div overlay in screen px (no SVG coord math). */
+.plot[data-tool='zoom'] {
+  cursor: zoom-in;
+}
+
+.zoom-rect {
+  position: absolute;
+  pointer-events: none;
+  border: 1px solid var(--office-accent);
+  background: color-mix(in oklch, var(--office-accent) 12%, transparent);
+}
+
+/* Marquee selection rectangle (select tool, drag on empty canvas) — dashed
+   amber outline matching the equipment selection color so the relationship
+   reads at a glance. */
+.marquee-rect {
+  position: absolute;
+  pointer-events: none;
+  border: 1px dashed #d97706;
+  background: color-mix(in oklch, #d97706 8%, transparent);
 }
 
 .zone-ghost {

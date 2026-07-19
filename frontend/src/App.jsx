@@ -110,7 +110,12 @@ function App() {
   const [editEquipPromptNonce, setEditEquipPromptNonce] = useState(0) // bump to open the selected equipment's edit dialog
   const bumpEditEquipPrompt = useCallback(() => setEditEquipPromptNonce((n) => n + 1), [])
   const [selectedZone, setSelectedZone] = useState(null) // currently selected keep-out/road/rack zone
-  const [selectedEquip, setSelectedEquip] = useState(null) // currently selected equipment tag
+  const [selectedEquips, setSelectedEquips] = useState([]) // selected equipment tags (multi-select: shift/ctrl+click, marquee)
+  // ponytail: primary selection = the last-added tag, kept as a derived
+  // value so existing single-selection call sites (Object tab, edit dialog,
+  // status bar) read one tag without each reinventing "last of the array".
+  const selectedEquip = selectedEquips.length ? selectedEquips[selectedEquips.length - 1] : null
+  const setSelectedEquip = useCallback((tag) => setSelectedEquips(tag ? [tag] : []), [])
 
   // ponytail: one helper for "this mutation dirties the doc" — every
   // user-driven setData/setPositions path that isn't a fresh load calls this.
@@ -163,7 +168,7 @@ function App() {
     setPositions(prev.positions)
     setScore(null)
     setSelectedZone(null)
-    setSelectedEquip(null)
+    setSelectedEquips([])
     markDirty()
     bumpHist()
   }, [snapshot, markDirty, bumpHist])
@@ -178,7 +183,7 @@ function App() {
     setPositions(next.positions)
     setScore(null)
     setSelectedZone(null)
-    setSelectedEquip(null)
+    setSelectedEquips([])
     markDirty()
     bumpHist()
   }, [snapshot, markDirty, bumpHist])
@@ -235,7 +240,7 @@ function App() {
   // even act on.
   useEffect(() => {
     setSelectedZone(null)
-    setSelectedEquip(null)
+    setSelectedEquips([])
   }, [tool])
 
   const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
@@ -254,7 +259,7 @@ function App() {
     setPositions(pos)
     setScore(null)
     setCases(null)
-    setSelectedEquip(null)
+    setSelectedEquips([])
     markClean()
     resetHistory()
   }, [markClean, resetHistory])
@@ -486,12 +491,14 @@ function App() {
   // x/y (in `positions`, not `data`) are untouched since rotating about an
   // item's own center doesn't move it. Changing `data` here re-triggers the
   // scoreLayout effect below, same as addZone/editZone.
-  const rotateEquipment = useCallback((tag, deg) => {
+  const rotateEquipment = useCallback((tags, deg) => {
+    const set = new Set(Array.isArray(tags) ? tags : [tags])
+    if (!set.size) return
     commit()
     setData((d) => ({
       ...d,
       equipment: d.equipment.map((e) => {
-        if (e.tag !== tag) return e
+        if (!set.has(e.tag)) return e
         const swapped = deg % 180 !== 0
         return {
           ...e,
@@ -520,23 +527,28 @@ function App() {
     markDirty()
   }, [commit, markDirty])
 
-  // Ribbon's Object > Remove button: drop the equipment itself, its
-  // position, and any connection referencing it (a dangling connection
-  // would otherwise crash the next Score/Solve call server-side, since
-  // piping_cost() looks up both ends by tag with no missing-tag guard).
-  const removeEquipment = useCallback((tag) => {
+  // Ribbon's Object > Remove button: drop the selected equipment (one tag
+  // from the ribbon's single-primary path, OR every tag in the multi-select
+  // when called with an array), its position(s), and any connection
+  // referencing it (a dangling connection would otherwise crash the next
+  // Score/Solve call server-side, since piping_cost() looks up both ends by
+  // tag with no missing-tag guard). Accepts a single tag or an array of
+  // tags so the Object tab can remove the whole multi-select at once.
+  const removeEquipment = useCallback((tags) => {
+    const set = new Set(Array.isArray(tags) ? tags : [tags])
+    if (!set.size) return
     commit()
     setData((d) => ({
       ...d,
-      equipment: d.equipment.filter((e) => e.tag !== tag),
-      connections: (d.connections ?? []).filter((c) => c.a !== tag && c.b !== tag),
+      equipment: d.equipment.filter((e) => !set.has(e.tag)),
+      connections: (d.connections ?? []).filter((c) => !set.has(c.a) && !set.has(c.b)),
     }))
     setPositions((p) => {
       const next = { ...p }
-      delete next[tag]
+      for (const t of set) delete next[t]
       return next
     })
-    setSelectedEquip(null)
+    setSelectedEquips([])
     markDirty()
   }, [commit, markDirty])
 
@@ -811,6 +823,7 @@ function App() {
           bumpEditPrompt={bumpEditPrompt} selectedZone={selectedZone} deleteZone={deleteSelectedZone}
           selectedEquip={selectedEquip} rotateEquipment={rotateEquipment} rotateZone={rotateZone}
           bumpEditEquipPrompt={bumpEditEquipPrompt} removeEquipment={removeEquipment}
+          selectedEquips={selectedEquips}
           zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
           newProject={newProject} openProject={openProject}
           saveProject={saveProject} saveProjectAs={saveProjectAs}
@@ -855,6 +868,7 @@ function App() {
           onAddZone={addZone} onDeleteZone={deleteZone} onEditZone={editZone} onRenameZone={renameZone}
           selectedZone={selectedZone} setSelectedZone={setSelectedZone}
           selectedEquip={selectedEquip} setSelectedEquip={setSelectedEquip}
+          selectedEquips={selectedEquips} setSelectedEquips={setSelectedEquips}
           onInteractionStart={onInteractionStart}
         />
       </main>

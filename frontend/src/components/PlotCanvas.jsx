@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { panBy, tickStep, ticksAtStep, zoomAt } from '@/lib/view'
+import { MAX_W, MIN_W, panBy, tickStep, ticksAtStep, zoomAt } from '@/lib/view'
 import { buildSpacingMap, closestPair, footprint, sideRect } from '@/lib/geom'
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -455,7 +455,7 @@ export default function PlotCanvas({
   rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth, drawPromptNonce,
   editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone, onRenameZone,
   selectedZone, setSelectedZone, editMode,
-  selectedEquip, setSelectedEquip, editEquipPromptNonce, onEditEquipment,
+  selectedEquip, setSelectedEquip, selectedEquips, setSelectedEquips, editEquipPromptNonce, onEditEquipment,
   realtimeMode, relaxLayout, flushRelax, onInteractionStart,
 }) {
   const { equipment, connections, site, keepouts, spacing, wind_clearance_m: windClearanceM } = data
@@ -503,13 +503,18 @@ export default function PlotCanvas({
   const wrapRef = useRef(null)
   const svgRef = useRef(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
-  const dragTag = useRef(null)
+  const dragTag = useRef(null) // single dragged equipment tag
+  const dragGroup = useRef(null) // {tags:[...], offs:{tag:{dx,dy}}} multi-select dragged group
   const pan = useRef(null) // {x, y} last client pos while panning
   const dragZone = useRef(null) // {zone, offX, offY} while dragging a whole zone in edit mode
   const drawStart = useRef(null) // {x, y} world point where a zone-draw drag began
+  const marqueeStart = useRef(null) // screen px {x,y} where a marquee selection drag began
+  const [marqueeRect, setMarqueeRect] = useState(null) // live marquee preview (screen px)
   const [measure, setMeasure] = useState(null) // live closest-neighbor readout while dragging
   const [zoneDim, setZoneDim] = useState(null) // {w, h, cx, cy} live width×height while resizing a zone
   const [drawRect, setDrawRect] = useState(null) // live press-drag-release preview {x1,y1,x2,y2}
+  const [zoomRect, setZoomRect] = useState(null) // live drag-to-zoom rubber-band preview (screen px)
+  const zoomStart = useRef(null) // screen px {x,y} where a drag-to-zoom began
   const [dragVert, setDragVert] = useState(null) // {zone, index} | {zone, edge} while dragging a vertex/edge handle
   const [editOpen, setEditOpen] = useState(false) // zone rename/role dialog
   const [editEquipOpen, setEditEquipOpen] = useState(false) // equipment properties dialog
@@ -686,6 +691,17 @@ export default function PlotCanvas({
       capture(ev)
       return
     }
+    if (tool === 'zoom') {
+      // drag-to-zoom: press records the start screen point, dragging
+      // previews a rubber-band rectangle, release fits the viewBox to the
+      // dragged world bbox (see onPointerUp). A plain tap (no real drag)
+      // zooms IN 2x centered on the click instead.
+      const rect = wrapRef.current.getBoundingClientRect()
+      zoomStart.current = { x: ev.clientX - rect.left, y: ev.clientY - rect.top }
+      setZoomRect({ x1: zoomStart.current.x, y1: zoomStart.current.y, x2: zoomStart.current.x, y2: zoomStart.current.y })
+      capture(ev)
+      return
+    }
     if (DRAW_PREFIX[tool]) {
       // press-drag-release mode: press sets the start point, dragging
       // previews a custom shape, release commits it (see onPointerUp) — a
@@ -699,7 +715,18 @@ export default function PlotCanvas({
       return
     }
     if (tool === 'select' || tool === 'edit') setSelectedZone(null)
-    if (tool === 'select') setSelectedEquip(null)
+    if (tool === 'select') {
+      // Start a marquee selection drag on empty canvas — the rect is tracked
+      // in screen px (see onPointerMove/onPointerUp); on a plain click with
+      // no real drag it just clears the selection (matches the old behavior).
+      const rect = wrapRef.current.getBoundingClientRect()
+      marqueeStart.current = { x: ev.clientX - rect.left, y: ev.clientY - rect.top }
+      setMarqueeRect({ x1: marqueeStart.current.x, y1: marqueeStart.current.y, x2: marqueeStart.current.x, y2: marqueeStart.current.y })
+      // don't clear yet — if a modifier-drag adds to the selection, clearing
+      // first would lose the existing selection mid-drag. Cleared on a plain
+      // click (no drag) in onPointerUp instead.
+      capture(ev)
+    }
   }
 
   function onPointerDownEquip(tag, ev) {
@@ -707,7 +734,40 @@ export default function PlotCanvas({
     // selected (for rotating) even though they can't be dragged.
     if (tool !== 'select') return
     ev.stopPropagation()
-    setSelectedEquip(tag)
+    const shift = ev.shiftKey
+    const ctrl = ev.ctrlKey || ev.metaKey
+    // Multi-select modifiers:
+    //  - plain click on an item already in the selection → keep the
+    //    current selection and drag the whole group (don't drop to single
+    //    until pointer-up if no drag happens, matching file managers).
+    //  - plain click on a non-selected item → single-select that one.
+    //  - ctrl+click → toggle membership in the selection (add or remove).
+    //  - shift+click → add to the selection (don't toggle off).
+    const already = selectedEquips.includes(tag)
+    if (ctrl) {
+      setSelectedEquips((s) => already ? s.filter((t) => t !== tag) : [...s, tag])
+    } else if (shift) {
+      if (!already) setSelectedEquips((s) => [...s, tag])
+    } else if (!already) {
+      setSelectedEquip(tag)
+    }
+    // drag the whole selection if the clicked item is part of it (and not
+    // pinned); otherwise drag just this item after it's been selected.
+    const group = (ctrl || shift || already) ? selectedEquips : [tag]
+    const movable = group.filter((t) => t !== tag && !byTag[t]?.pinned)
+    if (movable.length && !byTag[tag].pinned) {
+      // record per-tag grab offsets so the whole group follows the cursor
+      // without any item jumping on the first move: offset = pointer - tagPos,
+      // applied on move as tagPos = pointer - offset.
+      const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+      const px = p.x, py = site.d - p.y
+      const offs = {}
+      for (const t of movable) {
+        const tp = positions[t] ?? { x: byTag[t].x, y: byTag[t].y }
+        offs[t] = { dx: px - tp.x, dy: py - tp.y }
+      }
+      dragGroup.current = { tags: movable, offs }
+    }
     if (byTag[tag].pinned) return
     dragTag.current = tag
     onInteractionStart?.()
@@ -778,6 +838,13 @@ export default function PlotCanvas({
       setView((v) => panBy(v, rect, dx, dy))
       return
     }
+    if (marqueeStart.current) {
+      const rect = wrapRef.current.getBoundingClientRect()
+      const x = ev.clientX - rect.left
+      const y = ev.clientY - rect.top
+      setMarqueeRect({ x1: marqueeStart.current.x, y1: marqueeStart.current.y, x2: x, y2: y })
+      return
+    }
     if (dragVert) {
       const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
       let x = p.x
@@ -844,6 +911,13 @@ export default function PlotCanvas({
       dragZone.current = { zone, ox, oy }
       return
     }
+    if (zoomStart.current) {
+      const rect = wrapRef.current.getBoundingClientRect()
+      const x = ev.clientX - rect.left
+      const y = ev.clientY - rect.top
+      setZoomRect({ x1: zoomStart.current.x, y1: zoomStart.current.y, x2: x, y2: y })
+      return
+    }
     if (drawStart.current) {
       // keep the start fixed; the cursor drives the other point so the ghost
       // preview follows the pointer — a free corner for rect shapes, snapped
@@ -875,7 +949,27 @@ export default function PlotCanvas({
       x = Math.round(x / xt.minorStep) * xt.minorStep
       y = Math.round(y / yt.minorStep) * yt.minorStep
     }
-    const nextPositions = { ...positions, [tag]: { x, y } }
+    // Move the primary dragged tag, plus every tag in the multi-drag group
+    // by the SAME world delta (each kept at its own grab offset so the group
+    // translates rigidly — no relative drift between selected items).
+    const dg = dragGroup.current
+    let nextPositions
+    if (dg?.offs) {
+      nextPositions = { ...positions, [tag]: { x, y } }
+      for (const t of dg.tags) {
+        const o = dg.offs[t]
+        if (!o) continue
+        let tx = p.x - o.dx
+        let ty = (site.d - p.y) - o.dy
+        if (snap) {
+          tx = Math.round(tx / xt.minorStep) * xt.minorStep
+          ty = Math.round(ty / yt.minorStep) * yt.minorStep
+        }
+        nextPositions[t] = { x: tx, y: ty }
+      }
+    } else {
+      nextPositions = { ...positions, [tag]: { x, y } }
+    }
     onPositions(nextPositions)
     // Mode 2 (PLAN.md items 16-17): throttled POST /api/relax alongside the
     // instant /score feedback above — relax's reflowed positions (everyone
@@ -891,12 +985,94 @@ export default function PlotCanvas({
     // clearing dragTag, so the final reflow matches the exact drop position
     // instead of waiting out the rest of the throttle window.
     if (realtimeMode && dragTag.current) flushRelax()
+
+    // Marquee selection: a select-mode pointer-up on empty canvas either
+    // commits a marquee (drag > a few px) or — for a plain click with no
+    // modifier — clears the selection (the old empty-space-click behavior).
+    // shift/ctrl modifiers union the marquee hits with the existing
+    // selection instead of replacing it.
+    if (marqueeStart.current) {
+      const rect = wrapRef.current.getBoundingClientRect()
+      const sx = marqueeStart.current.x
+      const sy = marqueeStart.current.y
+      const ex = ev.clientX - rect.left
+      const ey = ev.clientY - rect.top
+      const dx = Math.abs(ex - sx)
+      const dy = Math.abs(ey - sy)
+      const mod = ev.shiftKey || ev.ctrlKey || ev.metaKey
+      if (dx < 3 && dy < 3) {
+        if (!mod) setSelectedEquip(null)
+      } else {
+        // convert screen rect -> world bbox (y flipped for SVG)
+        const x1w = v.x + (Math.min(sx, ex) / rect.width) * v.w
+        const x2w = v.x + (Math.max(sx, ex) / rect.width) * v.w
+        const y1w = v.y + (Math.min(sy, ey) / rect.height) * v.h
+        const y2w = v.y + (Math.max(sy, ey) / rect.height) * v.h
+        const hits = equipment.filter((e) => {
+          const p = positions[e.tag] ?? { x: e.x, y: e.y }
+          const [fx1, fy1, fx2, fy2] = footprint(e, p)
+          // footprint uses world y-up; marquee bbox is in the same
+          // world-up space (v.y is the SVG viewBox y, which is world y
+          // after the toY flip only matters for rendering — v.y/v.h are
+          // already in the flipped SVG coordinate system, so invert).
+          // Convert footprint y from world-up to SVG-y for the test:
+          const sfy1 = site.d - fy2
+          const sfy2 = site.d - fy1
+          return fx1 < x2w && fx2 > x1w && sfy1 < y2w && sfy2 > y1w
+        }).map((e) => e.tag)
+        if (mod) setSelectedEquips((s) => [...new Set([...s, ...hits])])
+        else setSelectedEquips(hits)
+      }
+      marqueeStart.current = null
+      setMarqueeRect(null)
+    }
+
     pan.current = null
     dragTag.current = null
+    dragGroup.current = null
     dragZone.current = null
     setDragVert(null)
     setMeasure(null)
     setZoneDim(null)
+
+    if (zoomStart.current) {
+      const rect = wrapRef.current.getBoundingClientRect()
+      const sx = zoomStart.current.x
+      const sy = zoomStart.current.y
+      const ex = ev.clientX - rect.left
+      const ey = ev.clientY - rect.top
+      const dx = Math.abs(ex - sx)
+      const dy = Math.abs(ey - sy)
+      // ponytail: a tap (no real drag) zooms IN 2x centered on the click,
+      // matching every map viewer's click-to-zoom-in convention; a drag
+      // fits the viewBox to the dragged world bbox, aspect-corrected to
+      // the canvas (height tracks width via the canvas aspect so the
+      // selected area isn't stretched — preserveAspectRatio="none" would
+      // otherwise distort it).
+      if (dx < 3 && dy < 3) {
+        setView((v) => zoomAt(v, rect, sx, sy, 0.5))
+      } else {
+        const x1 = Math.min(sx, ex), x2 = Math.max(sx, ex)
+        const y1 = Math.min(sy, ey), y2 = Math.max(sy, ey)
+        const w = ((x2 - x1) / rect.width) * view.w
+        const h = ((y2 - y1) / rect.height) * view.h
+        if (w > 0 && h > 0) {
+          const aspect = rect.height / rect.width
+          // grow the smaller axis so the viewBox aspect matches the canvas
+          // (no distortion) while keeping the dragged rect's CENTER fixed.
+          let fw = w, fh = h
+          if (fw / fh > 1 / aspect) fh = fw * aspect
+          else fw = fh / aspect
+          const cxw = view.x + ((x1 + x2) / 2 / rect.width) * view.w
+          const cyw = view.y + ((y1 + y2) / 2 / rect.height) * view.h
+          const clampedW = Math.min(Math.max(fw, MIN_W), MAX_W)
+          const clampedH = clampedW * aspect
+          setView({ x: cxw - clampedW / 2, y: cyw - clampedH / 2, w: clampedW, h: clampedH })
+        }
+      }
+      zoomStart.current = null
+      setZoomRect(null)
+    }
 
     if (drawStart.current) {
       const start = drawStart.current
@@ -1201,14 +1377,14 @@ export default function PlotCanvas({
                   width={e.w}
                   height={e.d}
                   fill={viewMode === 'normal' ? (CLASS_COLOR[e.cls] ?? '#888') : 'none'}
-                  className={`equip ${e.pinned ? 'pinned' : ''} ${violating ? 'violating' : ''} ${selectedEquip === e.tag ? 'selected' : ''}`}
+                  className={`equip ${e.pinned ? 'pinned' : ''} ${violating ? 'violating' : ''} ${selectedEquips.includes(e.tag) ? 'selected' : ''}`}
                   onPointerDown={(ev) => onPointerDownEquip(e.tag, ev)}
                 >
                   <title>{e.tag} — {e.cls} {e.w}×{e.d} m{e.pinned ? ' (pinned)' : ''}</title>
                 </rect>
                 <text
                   x={p.x} y={toY(p.y) - e.d / 2 - 0.6}
-                  className={`tag ${selectedEquip === e.tag ? 'selected' : ''}`}
+                  className={`tag ${selectedEquips.includes(e.tag) ? 'selected' : ''}`}
                 >
                   {e.tag}
                 </text>
@@ -1300,6 +1476,30 @@ export default function PlotCanvas({
             )
           })()}
         </svg>
+
+        {zoomRect && (
+          <div
+            className="zoom-rect"
+            style={{
+              left: Math.min(zoomRect.x1, zoomRect.x2),
+              top: Math.min(zoomRect.y1, zoomRect.y2),
+              width: Math.abs(zoomRect.x2 - zoomRect.x1),
+              height: Math.abs(zoomRect.y2 - zoomRect.y1),
+            }}
+          />
+        )}
+
+        {marqueeRect && (
+          <div
+            className="marquee-rect"
+            style={{
+              left: Math.min(marqueeRect.x1, marqueeRect.x2),
+              top: Math.min(marqueeRect.y1, marqueeRect.y2),
+              width: Math.abs(marqueeRect.x2 - marqueeRect.x1),
+              height: Math.abs(marqueeRect.y2 - marqueeRect.y1),
+            }}
+          />
+        )}
 
         <Dialog
           open={drawPromptOpen}
