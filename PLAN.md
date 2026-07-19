@@ -372,26 +372,46 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
     hit that path; upgrade CP-SAT's own call with a time-boxed retry loop
     checking `should_stop` between attempts if large-unit responsiveness
     ever matters.
-    Verified in `backend/test_stream.py`: `on_improve` fires 100+ times
-    on sample_unit with monotonically non-increasing costs, its last call
-    matches `solve()`'s returned best; `should_stop=lambda: True` halts
-    before any move runs and still returns `random_place()`'s (feasible)
-    starting layout; attaching both callbacks with `should_stop` always
-    `False` gives byte-identical costs/positions to not attaching them at
-    all (same seed). Also smoke-tested the live endpoint directly (`curl`
-    against a running `uvicorn`): a real 2-seed SSE stream on sample_unit
-    produces `progress`/`improve`/`done` events and a final cost matching
-    the CLI (344 @ seed 1); forcibly disconnecting mid-solve (`curl
-    --max-time`, a 31-item unit) leaves the server responsive to
-    subsequent requests immediately after, no hang or crash.
+     Verified in `backend/test_stream.py`: `on_improve` fires 100+ times
+     on sample_unit with monotonically non-increasing costs, its last call
+     matches `solve()`'s returned best; `should_stop=lambda: True` halts
+     before any move runs and still returns `random_place()`'s (feasible)
+     starting layout; attaching both callbacks with `should_stop` always
+     `False` gives byte-identical costs/positions to not attaching them at
+     all (same seed). Also smoke-tested the live endpoint directly (`curl`
+     against a running `uvicorn`): a real 2-seed SSE stream on sample_unit
+     produces `progress`/`improve`/`done` events and a final cost matching
+     the CLI (344 @ seed 1); forcibly disconnecting mid-solve (`curl
+     --max-time`, a 31-item unit) leaves the server responsive to
+     subsequent requests immediately after, no hang or crash.
+19. `[x]` **Nozzle / tie-in offsets** — optional `nozzle_dx,nozzle_dy`
+    columns in equipment.csv (meters, in the item's local/un-rotated frame,
+    relative to the center) name the physical point a pipe actually
+    connects at. `piping_cost()`, `write_takeoff()`, and `solve_cpsat()`'s
+    objective all route rise/run/drop from this tie-in point instead of the
+    centroid — a strict superset of the old center-based formula (offset
+    0,0 = center, so existing data is byte-for-byte unchanged). Rotation
+    rotates the offset to match w/d/pull_side: a 90° CW rotate maps
+    `(dx,dy) -> (dy,-dx)` (new `_rotate_point_cw`, mirroring the frontend's
+    `rotatePointCW`), so a tie-in on the item's east face stays on its
+    south face after one CW step. `solve()`'s SA rotate move,
+    `solve_cpsat()`'s decode step, and the frontend's manual Ribbon
+    rotate all apply it; `best_pos`/`on_improve`/SSE `improve` tuples all
+    grew `(nozzle_dx, nozzle_dy)` to match. CP-SAT's objective builds the
+    nozzle world x/y as a per-item linear expression conditioned on the
+    item's `ROT` var (`OnlyEnforceIf rot`/`rot.Not()`), so search optimizes
+    the true tie-in-to-tie-in route length, not a centroid approximation.
+    The frontend draws connection lines nozzle-to-nozzle and renders a
+    small `nozzle` marker on the canvas; the equipment edit dialog got two
+    offset fields. Verified in `backend/test_nozzle.py`: the rotation
+    cycle, the cost-measured-from-nozzle-vs-center difference, SA and
+    CP-SAT both keep the nozzle in sync with a forced rotation,
+    `write_takeoff` matches `piping_cost` with a nozzle, and legacy
+    zero-nozzle equipment is byte-identical to the old center formula.
+    *Effort: S.*
 
 ## Optional later (not scheduled)
 
-- **Nozzle/tie-in offsets** — the Besbes et al. (2021) paper's I/O-point
-  idea (Procedia CIRP 104), the one part of it worth importing: optional
-  `nozzle_dx,nozzle_dy` columns in equipment.csv, used by `piping_cost()`
-  instead of the center. Rotation must then rotate the offset. Cheap
-  realism gain, fully compatible with the analytic rack cost.
 - Penalty-based SA (accept infeasible states with a cost penalty) only if
   reject-infeasible + item 13 still stalls on very tight sites. Keep
   reject-infeasible as default: it is simpler and every intermediate

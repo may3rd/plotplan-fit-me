@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Magnet,
-  MousePointer2, Palette, Pause, Pencil, Play, Redo2, RotateCw, Ruler, Save, Search,
-  Settings as SettingsIcon, Trash2, Undo2, Zap, ZoomIn,
+  ArrowLeftRight, Crosshair, FilePlus, FileUp, Frame, Grid3x3, Hand, Info, LayoutGrid,
+  ListOrdered, MousePointer2, Palette, Pause, Pencil, Play, Redo2, RotateCw, Ruler,
+  Save, Search, Settings as SettingsIcon, Trash2, Undo2, Zap, ZoomIn,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -32,6 +32,20 @@ function Group({ label, children }) {
 }
 
 const ZOOM_PRESETS = [200, 150, 100, 75, 50, 25]
+
+// Tint colors for the View > Draw zone buttons — each matches the fill the
+// drawn zone renders with on the canvas (see .zone.<kind> in App.css), so a
+// glance at the ribbon tells you what color you're about to draw. `underground`
+// and generic `keepout` both render red on canvas (UNDERGROUND is just a
+// keepout-name prefix), so both buttons tint the same — that's correct, not
+// a missing distinction.
+const DRAW_TINT = {
+  'draw-road': '#7f8c8d',
+  'draw-rack': '#8bc98f',
+  'draw-maint': '#f1c40f',
+  'draw-underground': '#c0392b',
+  'draw-keepout': '#c0392b',
+}
 
 // Word-style "Zoom" dialog: a preset radio list plus a free-entry percent
 // field, opened from a single magnifier button — replaces the old inline
@@ -484,39 +498,62 @@ export default function Ribbon(props) {
           <Group label="Draw zone">
             <Button
               variant={tool === 'draw-road' ? 'default' : 'outline'} size="icon"
+              style={{ '--zone-tint': DRAW_TINT['draw-road'] }}
               onClick={() => { setTool('draw-road'); bumpDrawPrompt() }} title="Draw road" aria-label="Draw road"
             >
               <span className="font-bold">R</span>
             </Button>
             <Button
               variant={tool === 'draw-rack' ? 'default' : 'outline'} size="icon"
+              style={{ '--zone-tint': DRAW_TINT['draw-rack'] }}
               onClick={() => { setTool('draw-rack'); bumpDrawPrompt() }} title="Draw pipe rack" aria-label="Draw pipe rack"
             >
               <span className="font-bold">P</span>
             </Button>
             <Button
               variant={tool === 'draw-maint' ? 'default' : 'outline'} size="icon"
+              style={{ '--zone-tint': DRAW_TINT['draw-maint'] }}
               onClick={() => { setTool('draw-maint'); bumpDrawPrompt() }} title="Draw maintenance corridor" aria-label="Draw maintenance corridor"
             >
               <span className="font-bold">M</span>
             </Button>
             <Button
               variant={tool === 'draw-underground' ? 'default' : 'outline'} size="icon"
+              style={{ '--zone-tint': DRAW_TINT['draw-underground'] }}
               onClick={() => { setTool('draw-underground'); bumpDrawPrompt() }} title="Draw underground keep-out" aria-label="Draw underground keep-out"
             >
               <span className="font-bold">U</span>
             </Button>
             <Button
               variant={tool === 'draw-keepout' ? 'default' : 'outline'} size="icon"
+              style={{ '--zone-tint': DRAW_TINT['draw-keepout'] }}
               onClick={() => { setTool('draw-keepout'); bumpDrawPrompt() }} title="Draw keep-out zone" aria-label="Draw keep-out zone"
             >
               <span className="font-bold">K</span>
             </Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
-          <Group label="Snap">
-            <Toggle variant="outline" pressed={snap} onPressedChange={setSnap} title="Snap to grid" aria-label="Snap to grid">
-              <Magnet />
+          <Group label="Snap" title="Snap during drag — Alt suppresses, Shift forces all on">
+            <Toggle
+              variant="outline" pressed={!!snap.grid}
+              onPressedChange={(v) => setSnap((s) => ({ ...s, grid: v }))}
+              title="Snap to grid" aria-label="Snap to grid"
+            >
+              <Grid3x3 />
+            </Toggle>
+            <Toggle
+              variant="outline" pressed={!!snap.objects}
+              onPressedChange={(v) => setSnap((s) => ({ ...s, objects: v }))}
+              title="Snap to objects (equipment centers, zone vertices)" aria-label="Snap to objects"
+            >
+              <Crosshair />
+            </Toggle>
+            <Toggle
+              variant="outline" pressed={!!snap.borders}
+              onPressedChange={(v) => setSnap((s) => ({ ...s, borders: v }))}
+              title="Snap to site border" aria-label="Snap to site border"
+            >
+              <Frame />
             </Toggle>
           </Group>
         </TabsContent>

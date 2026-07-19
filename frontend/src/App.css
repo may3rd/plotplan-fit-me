@@ -126,12 +126,16 @@
 }
 
 /* File / Help dropdown triggers styled to sit flush in the tab strip and
-   read like the (inactive) tabs beside them. */
+   read like the (inactive) tabs beside them. The active underline mirrors
+   the line-variant TabsTrigger's ::after: when the dropdown is open
+   (aria-expanded), show the same 2px accent bar the active ribbon tab
+   shows, so the menu strip and the tab strip read as one visual language. */
 .titlebar-menubar {
   height: 100%;
   align-items: stretch;
 }
 .titlebar-menubar :where([data-slot='menubar-trigger']) {
+  position: relative;
   height: 100%;
   padding: 0 0.65rem;
   border-radius: 4px;
@@ -145,6 +149,14 @@
 .titlebar-menubar :where([data-slot='menubar-trigger'][aria-expanded='true']) {
   background: var(--office-ribbon-hover);
   color: var(--foreground);
+}
+.titlebar-menubar :where([data-slot='menubar-trigger'][aria-expanded='true'])::after {
+  content: '';
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--office-accent);
 }
 
 .ribbon-tablist {
@@ -244,6 +256,17 @@
 .ribbon-group :where([data-slot='button']):hover {
   background: var(--office-ribbon-hover);
   border-color: var(--office-ribbon-sep);
+}
+
+/* View > Draw zone buttons: a thin bottom strip in the zone's canvas fill
+   color (set via --zone-tint inline) so a glance at the ribbon shows what
+   color you're about to draw. The strip is the color cue (always legible
+   regardless of tint lightness — yellow-on-white text would not be); the
+   accent ring stays the "this tool is selected" cue. The active (default-
+   variant) button keeps both. */
+.ribbon-group [data-slot='button'][style*='--zone-tint'] {
+  border-bottom: 3px solid var(--zone-tint);
+  padding-bottom: 0;
 }
 
 /* active toggle in the ribbon — Tools group (Select / Pan / Edit), Snap,
@@ -689,6 +712,14 @@
   vector-effect: non-scaling-stroke;
 }
 
+.nozzle {
+  fill: #1e293b;
+  stroke: #e2e8f0;
+  stroke-width: 0.5;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
 .equip {
   stroke: #222;
   stroke-width: 1.2;
@@ -783,6 +814,32 @@
 .measure.violating .measure-label {
   fill: #c0392b;
 }
+
+/* ---- live snap indicator (drag) ------------------------------------------ */
+/* A small crosshair at the live snap point, colored by what was snapped to:
+   grid (gray), border (blue), object (amber). non-scaling-stroke keeps it
+   the same screen size at any zoom; pointer-events:none so it never
+   intercepts the drag it's indicating. */
+.snap-indicator {
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+.snap-indicator line {
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.snap-indicator circle {
+  fill: currentColor;
+  stroke: #fff;
+  stroke-width: 0.5;
+  vector-effect: non-scaling-stroke;
+}
+.snap-grid { color: #7f8c8d; }
+.snap-grid line { stroke: #7f8c8d; }
+.snap-border { color: #2563eb; }
+.snap-border line { stroke: #2563eb; }
+.snap-object { color: #d97706; }
+.snap-object line { stroke: #d97706; }
 
 /* Engineering-drawing dimension readout shown while resizing a zone:
    thin extension/guide lines from the corners, a dimension line outside the

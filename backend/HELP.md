@@ -30,10 +30,11 @@ One row per piece of equipment.
 | `pinned` | no | `true`/`yes`/`1` to fix this item in place; anything else (or blank) means the solver places it |
 | `pull_side` | no | `x+`, `x-`, `y+`, or `y-` — which face has a maintenance/tube-pull clearance |
 | `pull_len` | no | length in meters of that clearance; blank or `0` means none |
+| `nozzle_dx`, `nozzle_dy` | no | pipe tie-in point offset (m) from the center, in the item's local (un-rotated) frame. The solver scores each connection's rise/run/drop from this point instead of the centroid; rotates with the item. Blank/`0` = no offset, behavior is the old center-based formula. |
 
-You can omit `x,y,pinned,pull_side,pull_len` entirely — a plain 4-column
-file (`tag,cls,w,d`) still works, every item is just freely placed with no
-clearances.
+You can omit `x,y,pinned,pull_side,pull_len,nozzle_dx,nozzle_dy` entirely
+— a plain 4-column file (`tag,cls,w,d`) still works, every item is just
+freely placed with no clearances and center-based pipe routing.
 
 ### connections.csv — required
 

@@ -42,6 +42,16 @@ assert.equal(roundTripped.equipment.length, 2)
 assert.equal(roundTripped.site.w, 90)
 assert.equal(roundTripped.wind_clearance_m, 20)
 
+// nozzle_dx/nozzle_dy round-trip when present on equipment (kept by the
+// ...e spread in buildCaseData, no special handling)
+const withNozzle = { ...data, equipment: [
+  { ...data.equipment[0], nozzle_dx: 1.5, nozzle_dy: -2 },
+  data.equipment[1],
+] }
+const nzRound = parseProjectFile(projectFileContents(withNozzle, {}))
+assert.equal(nzRound.equipment[0].nozzle_dx, 1.5)
+assert.equal(nzRound.equipment[0].nozzle_dy, -2)
+
 // parseProjectFile rejects garbage and shapes missing equipment/site
 assert.throws(() => parseProjectFile('not json'), /not valid JSON/)
 assert.throws(() => parseProjectFile('{"foo": 1}'), /missing equipment\/site/)

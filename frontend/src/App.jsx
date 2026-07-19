@@ -9,7 +9,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { rotatePolyCW, rotateSide } from '@/lib/geom'
+import { rotatePolyCW, rotateSide, rotatePointCW } from '@/lib/geom'
 import { buildCaseData, BLANK_PROJECT, parseProjectFile, projectFileContents } from '@/lib/project'
 import { downloadRaster } from '@/lib/raster'
 import { fitView, reaspect, zoomAt, zoomPercent } from '@/lib/view'
@@ -95,7 +95,15 @@ function App() {
   const [showGrid, setShowGrid] = useState(true)
   const [showRuler, setShowRuler] = useState(true)
   const [gridStep, setGridStep] = useState(null) // meters/tick override; null = auto
-  const [snap, setSnap] = useState(false)
+  // Granular snap toggles — each gates one snap behavior in PlotCanvas:
+  //   grid    — snap dragged points to the nearest grid tick
+  //   objects — snap to equipment centers / zone vertices within a threshold
+  //   borders — soft-snap to the site border (was always-on before; now a
+  //             real toggle so you can drop a piece flush against an edge
+  //             without the grid getting in the way)
+  // Alt during a drag suppresses all three; Shift forces all three on for one
+  // drag (handled in PlotCanvas, reads ev.altKey/shiftKey — no state needed).
+  const [snap, setSnap] = useState({ grid: true, objects: true, borders: true })
   const [viewMode, setViewMode] = useState('normal') // 'normal' | 'wireframe' | 'dxf'
   const [tool, setTool] = useState('select') // 'select' | 'pan' | 'edit'
   const [theme, setTheme] = useState(() => localStorage.getItem('plotplan-theme') || 'system')
@@ -268,6 +276,19 @@ function App() {
   const [relaxOk, setRelaxOk] = useState(true)
   const relaxReqId = useRef(0)
   const relaxThrottle = useRef({ lastSentAt: 0, timer: null, latest: null })
+  // ponytail: mirror `data`/`positions` into refs so fireRelax can read their
+  // CURRENT values at fire time without re-creating its closure every drag
+  // frame. A useCallback that depends on [data, positions] captures stale
+  // values by the time the throttled trailing timer fires (#4c), and the
+  // response-apply step would push the dragged item back to a stale cursor
+  // position (#4b) — both fixed by reading refs here instead of state.
+  const dataRef = useRef(null)
+  const positionsRef = useRef({})
+  // latest dragged-item cursor position, separate from the throttle's
+  // `latest` (which also carries the tag) so the response-apply step can
+  // pin the dragged item at the CURRENT cursor, not the position the
+  // request was sent at — fixes the mid-drag backward flicker (#4b).
+  const relaxCursorRef = useRef(null)
 
   // Cancel any in-flight /relax: bump the id so a late response fails the
   // id-guard in fireRelax, and clear any pending throttled send. A hoisted
@@ -281,6 +302,14 @@ function App() {
       relaxThrottle.current.timer = null
     }
   }
+
+  // Keep dataRef/positionsRef mirroring state so fireRelax's stable closure
+  // reads current values at fire time (see the refs' declaration comment).
+  // One effect, no deps — runs after every render, cheap.
+  useEffect(() => {
+    dataRef.current = data
+    positionsRef.current = positions
+  })
 
   // shared by the unit-picker load, File > New, and File > Open — swaps in
   // a whole new project (data + positions rebuilt from its equipment) and
@@ -401,9 +430,12 @@ function App() {
       const equipment = d.equipment.map((e) => {
         const r = byTag[e.tag]
         if (!r) return e
-        if (r.w === e.w && r.d === e.d && r.pull_side === e.pull_side) return e
+        if (r.w === e.w && r.d === e.d && r.pull_side === e.pull_side
+            && (r.nozzle_dx ?? 0) === (e.nozzle_dx ?? 0)
+            && (r.nozzle_dy ?? 0) === (e.nozzle_dy ?? 0)) return e
         changed = true
-        return { ...e, w: r.w, d: r.d, pull_side: r.pull_side }
+        return { ...e, w: r.w, d: r.d, pull_side: r.pull_side,
+                 nozzle_dx: r.nozzle_dx ?? 0, nozzle_dy: r.nozzle_dy ?? 0 }
       })
       // Identity-stable: a relax response that didn't actually rotate
       // anything returns the same `data` reference, so React bails the
@@ -424,39 +456,61 @@ function App() {
   // packed-row drop); the relax response (feasible flag + reflowed
   // positions) is the authoritative source of {feasible, cost} in real-time
   // mode, so drag frames skip the competing per-frame /score call.
+  // fireRelax is stable (no [data, positions] deps) — it reads those via
+  // refs at fire time so the throttled trailing timer can't fire with a
+  // stale closure (#4c), and applies the dragged item's CURRENT cursor
+  // position from relaxCursorRef instead of the request-time one (#4b).
   const fireRelax = useCallback(() => {
     const args = relaxThrottle.current.latest
     relaxThrottle.current.timer = null
     relaxThrottle.current.lastSentAt = Date.now()
-    if (!args || !data) return
+    const d = dataRef.current
+    if (!args || !d) return
     const { tag, x, y } = args
     const id = ++relaxReqId.current
     fetch('/api/relax', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: buildCaseData(data, positions), tag, x, y }),
+      body: JSON.stringify({ data: buildCaseData(d, positionsRef.current), tag, x, y }),
     })
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`relax ${r.status}`)
+        return r.json()
+      })
       .then((res) => {
         if (id !== relaxReqId.current) return
         setRelaxOk(res.feasible)
         if (!res.feasible) return
         const pos = {}
         for (const e of res.equipment) pos[e.tag] = { x: e.x, y: e.y }
+        // #4b: pin the dragged item at the CURRENT cursor, not the position
+        // this (possibly stale) request was sent at — otherwise the item
+        // flickers backward until the next local pointermove corrects it.
+        const cur = relaxCursorRef.current
+        if (cur && cur.tag === tag) pos[tag] = { x: cur.x, y: cur.y }
         setPositions(pos)
         applyRotations(res.equipment)
         setScore({ feasible: true, cost: res.cost })
       })
-      .catch(() => {}) // ponytail: a dropped relax frame just means the next drag frame (or the on-drop flush) tries again
-  }, [data, positions, applyRotations])
+      .catch((err) => {
+        // ponytail: distinguish a network drop (transient — the next drag
+        // frame or on-drop flush retries) from a real backend error (a 500
+        // from a genuine bug shouldn't be invisible). Network drops stay
+        // silent; everything else surfaces to the console so a bug shows.
+        if (err?.message === 'relax 404' || err?.name === 'TypeError') return
+        console.error('relax failed:', err)
+      })
+  }, [applyRotations])
 
   // ~100ms throttle: fires immediately if it's been >=100ms since the last
   // call, otherwise schedules one trailing call for whenever that window
   // ends — always using the LATEST cursor position, so a fast continuous
   // drag gets a steady trickle of reflows instead of one queued call per
-  // pointermove event.
+  // pointermove event. Also records the latest cursor in relaxCursorRef
+  // so the response-apply step can pin the dragged item where it is now.
   const relaxLayout = useCallback((tag, x, y) => {
     relaxThrottle.current.latest = { tag, x, y }
+    relaxCursorRef.current = { tag, x, y }
     const elapsed = Date.now() - relaxThrottle.current.lastSentAt
     if (elapsed >= 100) fireRelax()
     else if (!relaxThrottle.current.timer) relaxThrottle.current.timer = setTimeout(fireRelax, 100 - elapsed)
@@ -464,7 +518,10 @@ function App() {
 
   // "commit on drop": fire whatever's pending right away instead of waiting
   // out the rest of the throttle window, so the final reflow matches the
-  // exact position the item was dropped at with no residual lag.
+  // exact position the item was dropped at with no residual lag. Doesn't
+  // clear relaxCursorRef — a pending fireRelax's response still needs the
+  // cursor to pin the dropped item at its real drop position; the next drag's
+  // relaxLayout overwrites the ref before any later relax fires anyway.
   const flushRelax = useCallback(() => {
     if (relaxThrottle.current.timer) {
       clearTimeout(relaxThrottle.current.timer)
@@ -545,11 +602,14 @@ function App() {
       equipment: d.equipment.map((e) => {
         if (!set.has(e.tag)) return e
         const swapped = deg % 180 !== 0
+        const [ndx, ndy] = rotatePointCW(e.nozzle_dx || 0, e.nozzle_dy || 0, deg)
         return {
           ...e,
           w: swapped ? e.d : e.w,
           d: swapped ? e.w : e.d,
           pull_side: rotateSide(e.pull_side, deg),
+          nozzle_dx: ndx,
+          nozzle_dy: ndy,
         }
       }),
     }))

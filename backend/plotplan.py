@@ -29,6 +29,15 @@ class Equipment:
     pinned: bool = False   # if True, solver never moves this item
     pull_side: str = ""    # "x+"/"x-"/"y+"/"y-" — tube-pull / maintenance
     pull_len: float = 0.0  # clearance length (m) that must stay clear on that side
+    # nozzle / tie-in offset (m) in the item's LOCAL (un-rotated) frame,
+    # relative to the center — the physical point a pipe actually connects
+    # at, instead of the centroid. Used by piping_cost()/solve_cpsat()/
+    # write_takeoff() so a connection's rise/run/drop is measured nozzle-to-
+    # nozzle, not center-to-center. Rotates with the item (a 90° CW rotate
+    # maps (dx,dy) -> (dy,-dx), same cycle as _rotate_side_cw); blank (0,0)
+    # = no offset, behavior is exactly the old center-based formula.
+    nozzle_dx: float = 0.0
+    nozzle_dy: float = 0.0
 
 # ponytail: fallback spacing table (GAP.2.5.2-style placeholder values), used
 # only if a unit's data dir has no spacing.csv. Real units should ship their
@@ -91,8 +100,9 @@ Connection = tuple
 # what int()/float() raise — good enough for a tool one team runs by hand.
 
 def load_equipment(path: str) -> list:
-    # ponytail: optional x,y,pinned,pull_side,pull_len columns — missing
-    # entirely (old files) or blank both resolve to the field's default.
+    # ponytail: optional x,y,pinned,pull_side,pull_len,nozzle_dx,nozzle_dy
+    # columns — missing entirely (old files) or blank both resolve to the
+    # field's default.
     with open(path, newline="") as f:
         eq = []
         for r in csv.DictReader(f):
@@ -101,8 +111,10 @@ def load_equipment(path: str) -> list:
             y = float(r["y"]) if pinned and r.get("y") else 0.0
             pull_side = (r.get("pull_side") or "").strip()
             pull_len = float(r["pull_len"]) if r.get("pull_len") else 0.0
+            ndx = float(r["nozzle_dx"]) if r.get("nozzle_dx") else 0.0
+            ndy = float(r["nozzle_dy"]) if r.get("nozzle_dy") else 0.0
             eq.append(Equipment(r["tag"], r["cls"], float(r["w"]), float(r["d"]),
-                                 x, y, pinned, pull_side, pull_len))
+                                 x, y, pinned, pull_side, pull_len, ndx, ndy))
         return eq
 
 def load_connections(path: str) -> list:
@@ -220,10 +232,28 @@ _ROTATE_CW = {"x+": "y-", "y-": "x-", "x-": "y+", "y+": "x+"}
 def _rotate_side_cw(side: str) -> str:
     return _ROTATE_CW.get(side, side)
 
+# 90° CW rotation of a 2D offset, matching _rotate_side_cw's cycle: a nozzle
+# at +x (dx,dy)=(1,0) lands on the item's -y face after one CW step, so it
+# becomes (0,-1). Called by solve()'s SA rotate move and solve_cpsat()'s
+# decode step to keep nozzle world-position consistent with w/d/pull_side
+# after a rotation. N steps = repeat N times (180: (-dx,-dy); 270: (-dy,dx)).
+def _rotate_point_cw(dx: float, dy: float) -> tuple:
+    return (dy, -dx)
+
 def _pull_rect(e: Equipment):
     """Tube-pull / maintenance clearance rectangle attached to one side of
     the footprint, or None if the item has no pull clearance defined."""
     return _side_rect(*_footprint(e), e.pull_side, e.pull_len)
+
+def _nozzle_xy(e: Equipment):
+    """World (x, y) of the pipe tie-in point — the center plus the
+    nozzle offset, rotated to match the item's current orientation (a 90°
+    CW-rotated footprint has had its nozzle rotated the same way). (0, 0)
+    offset = the equipment center, so this is a strict superset of the old
+    center-based piping formula."""
+    if not e.nozzle_dx and not e.nozzle_dy:
+        return (e.x, e.y)
+    return (e.x + e.nozzle_dx, e.y + e.nozzle_dy)
 
 def _wind_rect(e: Equipment, wind_dir: str):
     """Upwind exclusion rectangle for a fired heater, or None if this item
@@ -293,6 +323,9 @@ def piping_cost(eq: list, conns: list, site: Site, keepouts: dict = None) -> flo
     # endpoint's x actually falls inside the chosen rack's x-extent — same
     # simplification the old infinite-width racks made for free; upgrade to
     # excluding/penalizing out-of-bounds routes if a real unit needs it.
+    # rise/run/drop are measured nozzle-to-nozzle (_nozzle_xy) when an item
+    # has a nozzle/tie-in offset, else center-to-center — a strict superset
+    # of the old formula (offset 0,0 = center).
     racks = _rack_zones(keepouts)
     if conns and not racks:
         raise RuntimeError("no pipe rack zone defined (a keepouts zone named RACK*)")
@@ -301,12 +334,14 @@ def piping_cost(eq: list, conns: list, site: Site, keepouts: dict = None) -> flo
     xs_by_rack = {}
     for a, b, w in conns:
         ea, eb = by_tag[a], by_tag[b]
+        ax, ay = _nozzle_xy(ea)
+        bx, by = _nozzle_xy(eb)
         zone, ry = min(
             ((z, (_bbox(poly)[1] + _bbox(poly)[3]) / 2) for z, poly in racks),
-            key=lambda zr: abs(ea.y - zr[1]) + abs(eb.y - zr[1]),
+            key=lambda zr: abs(ay - zr[1]) + abs(by - zr[1]),
         )
-        total += w * (abs(ea.y - ry) + abs(ea.x - eb.x) + abs(eb.y - ry))
-        xs_by_rack.setdefault(zone, []).extend([ea.x, eb.x])
+        total += w * (abs(ay - ry) + abs(ax - bx) + abs(by - ry))
+        xs_by_rack.setdefault(zone, []).extend([ax, bx])
     # rack steel: only the racks actually used need physical span costed.
     total += RACK_STEEL_COST_PER_M * sum(max(xs) - min(xs) for xs in xs_by_rack.values())
     return total
@@ -394,11 +429,13 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
     on_improve: optional callable(best_cost, positions, k) fired every time
     SA accepts a new best (not throttled — an "anytime" stream of every
     real improvement, not a periodic heartbeat). positions is a snapshot
-    list of (tag, x, y, w, d, pull_side) tuples, safe to hold onto after the
-    call — eq itself keeps mutating every iteration, so the live objects
-    aren't. pull_side is included because the rotate move rotates it along
-    with w/d (see _rotate_side_cw) — a stale pull_side would point a
-    rotated item's tube-pull clearance the wrong way relative to its body.
+    list of (tag, x, y, w, d, pull_side, nozzle_dx, nozzle_dy) tuples, safe to
+    hold onto after the call — eq itself keeps mutating every iteration, so
+    the live objects aren't. pull_side and nozzle_dx/dy are included because
+    the rotate move rotates them along with w/d (see _rotate_side_cw /
+    _rotate_point_cw) — a stale pull_side would point a rotated item's
+    tube-pull clearance the wrong way, and a stale nozzle offset would route
+    a pipe to the pre-rotation tie-in point.
     should_stop: optional callable() -> bool, checked every iteration; a
     truthy return breaks the loop early. Whatever iteration it stops at,
     eq is written back to best_pos before returning (see below), which is
@@ -432,7 +469,7 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
     wind_dir = site.wind_dir
     cost = piping_cost(eq, conns, site, keepouts)
     best = cost
-    best_pos = [(e.x, e.y, e.w, e.d, e.pull_side) for e in eq]
+    best_pos = [(e.x, e.y, e.w, e.d, e.pull_side, e.nozzle_dx, e.nozzle_dy) for e in eq]
     for k in range(iters):
         if should_stop and should_stop():
             break
@@ -461,10 +498,13 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
             e.w, e.d = e.d, e.w
             old_pull_side = e.pull_side
             e.pull_side = _rotate_side_cw(e.pull_side)
+            old_ndx, old_ndy = e.nozzle_dx, e.nozzle_dy
+            e.nozzle_dx, e.nozzle_dy = _rotate_point_cw(e.nozzle_dx, e.nozzle_dy)
             touched = (e,)
-            def undo(e=e, old_pull_side=old_pull_side):
+            def undo(e=e, old_pull_side=old_pull_side, old_ndx=old_ndx, old_ndy=old_ndy):
                 e.w, e.d = e.d, e.w
                 e.pull_side = old_pull_side
+                e.nozzle_dx, e.nozzle_dy = old_ndx, old_ndy
         elif r < 0.9:
             if len(movable) < 2:
                 continue
@@ -498,13 +538,13 @@ def solve(eq: list, conns: list, site: Site, spacing: dict = None, keepouts: dic
         if new < cost or rng.random() < math.exp((cost - new) / t):
             cost = new
             if cost < best:
-                best, best_pos = cost, [(q.x, q.y, q.w, q.d, q.pull_side) for q in eq]
+                best, best_pos = cost, [(q.x, q.y, q.w, q.d, q.pull_side, q.nozzle_dx, q.nozzle_dy) for q in eq]
                 if on_improve:
-                    on_improve(best, [(q.tag, q.x, q.y, q.w, q.d, q.pull_side) for q in eq], k)
+                    on_improve(best, [(q.tag, q.x, q.y, q.w, q.d, q.pull_side, q.nozzle_dx, q.nozzle_dy) for q in eq], k)
         else:
             undo()
-    for e, (x, y, w, d, pull_side) in zip(eq, best_pos):
-        e.x, e.y, e.w, e.d, e.pull_side = x, y, w, d, pull_side
+    for e, (x, y, w, d, pull_side, ndx, ndy) in zip(eq, best_pos):
+        e.x, e.y, e.w, e.d, e.pull_side, e.nozzle_dx, e.nozzle_dy = x, y, w, d, pull_side, ndx, ndy
     return best
 
 # ------------------------------------------------------ CP-SAT solver (item 11)
@@ -738,21 +778,49 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
     site_d2 = 2 * site_d
     cx2 = {tag: 2 * L[tag] + FW[tag] for tag in L}
     cy2 = {tag: 2 * B[tag] + FD[tag] for tag in L}
+    # nozzle world position (x2 grid units) — the tie-in point a pipe actually
+    # connects at, instead of the centroid. _nozzle_xy(e) = center + offset
+    # rotated to the item's current orientation; here that's two linear
+    # expressions, one per ROT branch, each OnlyEnforceIf the matching ROT
+    # (or unconditional for pinned/no-ROT items). A 0,0 offset makes nx2==cx2,
+    # so the objective reduces to the old center-based formula exactly.
+    nx2, ny2 = {}, {}
+    G2 = 2.0 * G
+    for e in eq:
+        tag = e.tag
+        if tag not in ROT:
+            nx2[tag] = cx2[tag] + round(2 * e.nozzle_dx / G)
+            ny2[tag] = cy2[tag] + round(2 * e.nozzle_dy / G)
+            continue
+        rot = ROT[tag]
+        # not rotated (rot=0): offset (dx, dy); rotated (rot=1): (dy, -dx)
+        off_nx2 = round(2 * e.nozzle_dx / G)
+        off_ny2 = round(2 * e.nozzle_dy / G)
+        off_rx2 = round(2 * e.nozzle_dy / G)
+        off_ry2 = round(2 * (-e.nozzle_dx) / G)
+        nx_v = model.NewIntVar(-2 * site_w, 2 * site_w, f"NX2_{tag}")
+        ny_v = model.NewIntVar(-2 * site_d, 2 * site_d, f"NY2_{tag}")
+        model.Add(nx_v == cx2[tag] + off_nx2).OnlyEnforceIf(rot.Not())
+        model.Add(nx_v == cx2[tag] + off_rx2).OnlyEnforceIf(rot)
+        model.Add(ny_v == cy2[tag] + off_ny2).OnlyEnforceIf(rot.Not())
+        model.Add(ny_v == cy2[tag] + off_ry2).OnlyEnforceIf(rot)
+        nx2[tag] = nx_v
+        ny2[tag] = ny_v
     rack_y2 = [round((_bbox(poly)[1] + _bbox(poly)[3]) / G) for _, poly in rack_zones]
     terms = []
     for idx, (a_tag, b_tag, weight) in enumerate(conns):
         run = model.NewIntVar(0, 2 * site_w, f"run{idx}")
-        model.Add(run >= cx2[a_tag] - cx2[b_tag])
-        model.Add(run >= cx2[b_tag] - cx2[a_tag])
+        model.Add(run >= nx2[a_tag] - nx2[b_tag])
+        model.Add(run >= nx2[b_tag] - nx2[a_tag])
         rise = model.NewIntVar(0, site_d2, f"rise{idx}")
         drop = model.NewIntVar(0, site_d2, f"drop{idx}")
         choose = [model.NewBoolVar(f"choose{idx}_{k}") for k in range(len(rack_zones))]
         model.Add(sum(choose) == 1)
         for k, ry2 in enumerate(rack_y2):
-            model.Add(rise >= cy2[a_tag] - ry2).OnlyEnforceIf(choose[k])
-            model.Add(rise >= ry2 - cy2[a_tag]).OnlyEnforceIf(choose[k])
-            model.Add(drop >= cy2[b_tag] - ry2).OnlyEnforceIf(choose[k])
-            model.Add(drop >= ry2 - cy2[b_tag]).OnlyEnforceIf(choose[k])
+            model.Add(rise >= ny2[a_tag] - ry2).OnlyEnforceIf(choose[k])
+            model.Add(rise >= ry2 - ny2[a_tag]).OnlyEnforceIf(choose[k])
+            model.Add(drop >= ny2[b_tag] - ry2).OnlyEnforceIf(choose[k])
+            model.Add(drop >= ry2 - ny2[b_tag]).OnlyEnforceIf(choose[k])
         terms.append(round(weight * 100) * (run + rise + drop))
     model.Minimize(sum(terms))
 
@@ -776,6 +844,8 @@ def solve_cpsat(eq: list, conns: list, site: Site, spacing: dict = None, keepout
         x = solver.Value(L[e.tag]) * G + w / 2
         y = solver.Value(B[e.tag]) * G + d / 2
         pull_side = _rotate_side_cw(e.pull_side) if rotated else e.pull_side
+        if rotated:
+            e.nozzle_dx, e.nozzle_dy = _rotate_point_cw(e.nozzle_dx, e.nozzle_dy)
         e.x, e.y, e.w, e.d, e.pull_side = x, y, w, d, pull_side
     return piping_cost(eq, conns, site, keepouts)
 
@@ -1272,14 +1342,16 @@ def write_takeoff(path: str, eq: list, conns: list, site: Site, keepouts: dict =
         w.writerow(["type", "a", "b", "weight", "length_m"])
         for a, b, weight in conns:
             ea, eb = by_tag[a], by_tag[b]
+            ax, ay = _nozzle_xy(ea)
+            bx, by = _nozzle_xy(eb)
             zone, ry = min(
                 ((z, (_bbox(poly)[1] + _bbox(poly)[3]) / 2) for z, poly in racks),
-                key=lambda zr: abs(ea.y - zr[1]) + abs(eb.y - zr[1]),
+                key=lambda zr: abs(ay - zr[1]) + abs(by - zr[1]),
             )
-            length = abs(ea.y - ry) + abs(ea.x - eb.x) + abs(eb.y - ry)
+            length = abs(ay - ry) + abs(ax - bx) + abs(by - ry)
             w.writerow(["pipe", a, b, f"{weight:g}", f"{length:.2f}"])
             total_pipe_m += length
-            xs_by_rack.setdefault(zone, []).extend([ea.x, eb.x])
+            xs_by_rack.setdefault(zone, []).extend([ax, bx])
         for zone in sorted(xs_by_rack):
             span = max(xs_by_rack[zone]) - min(xs_by_rack[zone])
             w.writerow(["rack_span_used", "", zone, "", f"{span:.2f}"])

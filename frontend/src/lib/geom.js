@@ -98,10 +98,12 @@ export function sideRect(x1, y1, x2, y2, side, length) {
 
 // Rotating a footprint 90deg clockwise cycles a direction the same way a
 // compass needle would: x+ -> y- -> x- -> y+ -> x+. Used to keep pull_side
-// pointing the same way relative to the equipment after a manual rotate
-// (unlike solve()'s SA rotate move, which only swaps w/d and leaves
-// pull_side untouched — fine there since SA never rotates a pulled item's
-// meaning, only its bounding box).
+// pointing the same way relative to the equipment after a manual rotate.
+// `rotatePointCW` mirrors the backend's `_rotate_point_cw` for a nozzle
+// offset — one CW step maps (dx, dy) -> (dy, -dx). The backend's SA rotate
+// and CP-SAT decode both rotate pull_side and the nozzle offset alongside
+// w/d; the frontend's manual rotate (rotateEquipment) must too, so the
+// rendered tie-in point and the backend's cost stay in sync after a click.
 const ROTATE_CW = { 'x+': 'y-', 'y-': 'x-', 'x-': 'y+', 'y+': 'x+' }
 
 /** `side` ("x+"/"x-"/"y+"/"y-"/"") rotated `deg` (90/180/270) clockwise. */
@@ -109,6 +111,13 @@ export function rotateSide(side, deg) {
   let s = side
   for (let i = 0; i < (deg / 90) % 4; i++) s = ROTATE_CW[s] ?? s
   return s
+}
+
+/** A 2D offset (dx, dy) rotated `deg` (90/180/270) clockwise. */
+export function rotatePointCW(dx, dy, deg) {
+  let x = dx, y = dy
+  for (let i = 0; i < (deg / 90) % 4; i++) { [x, y] = [y, -x] }
+  return [x, y]
 }
 
 // Rotate a polygon (array of [x, y] world points) `deg` (90/180/270)
@@ -134,4 +143,56 @@ export function rotatePolyCW(poly, deg) {
   const out = poly.map(rot)
   if (steps === 2) out.reverse()
   return out
+}
+
+// ---- snapping ---------------------------------------------------------------
+// Pure snap helpers for the drag interaction (PlotCanvas). Each returns a
+// snapped point {x, y, kind} or null (no snap within threshold). `kind` tells
+// the indicator what color to draw. The drag handler composes them in
+// priority order (object > grid > border — an object near a grid line wins
+// because the user put it there on purpose) and the indicator shows the
+// winning snap's kind. Callers read `snap.{grid,objects,borders}` to decide
+// which helpers to run; Alt/Shift modifier is handled at the call site, not
+// here, so the helpers stay pure and testable in isolation.
+
+/** Snap (x, y) to the nearest grid tick at `step` on each axis. */
+export function snapToGrid(x, y, stepX, stepY) {
+  if (!stepX || !stepY) return null
+  return {
+    x: Math.round(x / stepX) * stepX,
+    y: Math.round(y / stepY) * stepY,
+    kind: 'grid',
+  }
+}
+
+/** Snap (x, y) to the nearest of a list of candidate points within `thresh`
+ * (world meters). `candidates` is an array of [x, y] (e.g. every equipment
+ * center + every zone vertex). Returns null if none are within thresh. */
+export function snapToObject(x, y, candidates, thresh) {
+  let best = null
+  let bestD = Infinity
+  for (const [cx, cy] of candidates) {
+    const d = Math.hypot(cx - x, cy - y)
+    // strict < keeps the FIRST-seen candidate on a tie (deterministic by
+    // input order — equipment centers before zone vertices), rather than
+    // letting a later equal-distance one overwrite.
+    if (d <= thresh && d < bestD) {
+      best = { x: cx, y: cy, kind: 'object' }
+      bestD = d
+    }
+  }
+  return best
+}
+
+/** Snap (x, y) to the nearest site border (low/high on each axis) within
+ * `thresh`. Independent per axis so a point near the west border but far
+ * from north/south still snaps to x=low while keeping its y. Returns the
+ * snapped point or null if neither axis is in range. */
+export function snapToBorder(x, y, w, d, thresh) {
+  let nx = x, ny = y, snapped = false
+  if (Math.abs(x - 0) < thresh) { nx = 0; snapped = true }
+  else if (Math.abs(x - w) < thresh) { nx = w; snapped = true }
+  if (Math.abs(y - 0) < thresh) { ny = 0; snapped = true }
+  else if (Math.abs(y - d) < thresh) { ny = d; snapped = true }
+  return snapped ? { x: nx, y: ny, kind: 'border' } : null
 }

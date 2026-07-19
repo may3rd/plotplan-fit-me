@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { MAX_W, MIN_W, panBy, tickStep, ticksAtStep, zoomAt } from '@/lib/view'
-import { buildSpacingMap, closestPair, footprint, sideRect } from '@/lib/geom'
+import { buildSpacingMap, closestPair, footprint, sideRect, snapToBorder, snapToGrid, snapToObject } from '@/lib/geom'
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
@@ -21,6 +21,14 @@ const CLASS_COLOR = {
 
 const RULER = 26 // px thickness of each ruler strip
 const SOFT_SNAP_M = 1.0 // soft-snap to the site border when a dragged point is within this many meters
+// Object-snap threshold in world meters — candidates (equipment centers,
+// zone vertices) closer than this snap. Screen-pixel-independent: at a
+// typical fit view (~80m site over ~800px) 1.5m ≈ 15px, which reads as a
+// "magnetic" feel without grabbing things you didn't aim at. If a future
+// unit renders so densely that 1.5m covers several candidates, the
+// nearest-wins rule still does the right thing; promote to zoom-adaptive
+// only if a real unit proves the fixed value feels wrong.
+const OBJECT_SNAP_THRESH_M = 1.5
 // If the last regularly-spaced beam interval lands closer than this to the
 // rack's far end, skip that beam and draw one exactly at the end instead —
 // avoids an awkward, oddly-short final bay.
@@ -45,13 +53,36 @@ const EXT_GAP = 0.5     // gap from zone corner to extension-line start
 const EXT_OVER = 1.0    // extension-line overshoot past the dimension line
 const ARROW = 1.2       // arrowhead open-angle size
 
-// Soft-snap a world coordinate to the nearest site border (0 or the site's
-// extent on that axis) when it's within SOFT_SNAP_M, otherwise leave it. Used
-// while dragging/resizing zones so a side can drop flush against the site edge.
-function softBorder(val, low, high) {
-  if (Math.abs(val - low) < SOFT_SNAP_M) return low
-  if (Math.abs(val - high) < SOFT_SNAP_M) return high
-  return val
+// Compose the granular snap helpers into one drag-frame decision. Priority
+// is object > grid > border — an object near a grid line wins because the
+// user placed it there on purpose. Returns {x, y, snap} where `snap` is the
+// winning snap point {x, y, kind} (for the indicator) or null (no snap
+// applied / raw point kept). `mods` carries ev.altKey (suppress ALL snap
+// for this frame) and ev.shiftKey (force ALL snap on for this frame).
+// `cands` is the object-snap candidate list (equipment centers + zone
+// vertices), precomputed by the caller via snapCandidates (below).
+function applySnap(x, y, snap, mods, cands, stepX, stepY, site) {
+  const on = mods.shiftKey || (!mods.altKey && (snap.grid || snap.objects || snap.borders))
+  if (!on) return { x, y, snap: null }
+  const flags = mods.shiftKey
+    ? { grid: true, objects: true, borders: true }
+    : mods.altKey
+      ? { grid: false, objects: false, borders: false }
+      : snap
+  // object first (user intent), then grid, then border
+  if (flags.objects && cands.length) {
+    const s = snapToObject(x, y, cands, OBJECT_SNAP_THRESH_M)
+    if (s) return { x: s.x, y: s.y, snap: s }
+  }
+  if (flags.grid) {
+    const s = snapToGrid(x, y, stepX, stepY)
+    if (s) return { x: s.x, y: s.y, snap: s }
+  }
+  if (flags.borders) {
+    const s = snapToBorder(x, y, site.w, site.d, SOFT_SNAP_M)
+    if (s) return { x: s.x, y: s.y, snap: s }
+  }
+  return { x, y, snap: null }
 }
 
 // tool -> the zone-name prefix it draws (see backend plotplan._rack_zones /
@@ -462,6 +493,22 @@ export default function PlotCanvas({
   const byTag = Object.fromEntries(equipment.map((e) => [e.tag, e]))
   const toY = (y) => site.d - y // north-up: flip y for SVG
   const spacingMap = useMemo(() => buildSpacingMap(spacing), [spacing])
+  // Object-snap candidate points: every equipment center + every zone
+  // vertex. Memoized on data/positions so a drag frame doesn't rebuild it
+  // every pointermove (positions change every frame, but the candidate SET
+  // for object-snap is the *other* items' positions + zone geometry, which
+  // only changes when a different edit lands — fine to recompute then).
+  const snapCands = useMemo(() => {
+    const out = []
+    for (const e of equipment) {
+      const p = positions[e.tag] ?? { x: e.x, y: e.y }
+      out.push([p.x, p.y])
+    }
+    for (const poly of Object.values(keepouts ?? {})) {
+      for (const v of poly ?? []) out.push([v[0], v[1]])
+    }
+    return out
+  }, [equipment, keepouts, positions])
   // roads that overlap/touch get grouped so the whole chain renders as one
   // merged, rounded-at-the-turns shape instead of separate rectangles with
   // a visible seam at every join (see unionRoadOutline).
@@ -516,6 +563,7 @@ export default function PlotCanvas({
   const marqueeStart = useRef(null) // screen px {x,y} where a marquee selection drag began
   const [marqueeRect, setMarqueeRect] = useState(null) // live marquee preview (screen px)
   const [measure, setMeasure] = useState(null) // live closest-neighbor readout while dragging
+  const [snapPoint, setSnapPoint] = useState(null) // live snap indicator {x, y, kind} while dragging, null when no snap applied
   const [zoneDim, setZoneDim] = useState(null) // {w, h, cx, cy} live width×height while resizing a zone
   const [drawRect, setDrawRect] = useState(null) // live press-drag-release preview {x1,y1,x2,y2}
   const [zoomRect, setZoomRect] = useState(null) // live drag-to-zoom rubber-band preview (screen px)
@@ -862,15 +910,11 @@ export default function PlotCanvas({
     }
     if (dragVert) {
       const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
-      let x = p.x
-      let y = site.d - p.y
-      if (snap) {
-        x = Math.round(x / xt.minorStep) * xt.minorStep
-        y = Math.round(y / yt.minorStep) * yt.minorStep
-      }
-      // soft-snap a dragged corner to the site border when close.
-      x = softBorder(x, 0, site.w)
-      y = softBorder(y, 0, site.d)
+      const r = applySnap(p.x, site.d - p.y, snap, { altKey: ev.altKey, shiftKey: ev.shiftKey },
+                         snapCands, xt.minorStep, yt.minorStep, site)
+      let x = r.x
+      let y = r.y
+      setSnapPoint(r.snap)
       const cur = keepouts[dragVert.zone] ?? []
       let poly
       if (dragVert.edge !== undefined) {
@@ -906,16 +950,12 @@ export default function PlotCanvas({
     }
     if (dragZone.current) {
       const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
-      let x = p.x + dragZone.current.ox
-      let y = (site.d - p.y) + dragZone.current.oy
-      if (snap) {
-        x = Math.round(x / xt.minorStep) * xt.minorStep
-        y = Math.round(y / yt.minorStep) * yt.minorStep
-      }
-      // soft-snap the dragged zone to the site border when its first vertex
-      // gets close — drops the whole polygon flush against an edge.
-      x = softBorder(x, 0, site.w)
-      y = softBorder(y, 0, site.d)
+      const r = applySnap(p.x + dragZone.current.ox, (site.d - p.y) + dragZone.current.oy,
+                          snap, { altKey: ev.altKey, shiftKey: ev.shiftKey },
+                          snapCands, xt.minorStep, yt.minorStep, site)
+      let x = r.x
+      let y = r.y
+      setSnapPoint(r.snap)
       const { zone, ox, oy } = dragZone.current
       const poly = keepouts[zone] ?? []
       const first = poly[0] ?? [0, 0]
@@ -958,29 +998,27 @@ export default function PlotCanvas({
     const tag = dragTag.current
     if (!tag) return
     const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
-    let x = p.x
-    let y = site.d - p.y
-    if (snap) {
-      x = Math.round(x / xt.minorStep) * xt.minorStep
-      y = Math.round(y / yt.minorStep) * yt.minorStep
-    }
+    const mods = { altKey: ev.altKey, shiftKey: ev.shiftKey }
+    const r = applySnap(p.x, site.d - p.y, snap, mods, snapCands, xt.minorStep, yt.minorStep, site)
+    const x = r.x
+    const y = r.y
+    setSnapPoint(r.snap)
     // Move the primary dragged tag, plus every tag in the multi-drag group
     // by the SAME world delta (each kept at its own grab offset so the group
-    // translates rigidly — no relative drift between selected items).
+    // translates rigidly — no relative drift between selected items). The
+    // snap is applied to the primary point only; group members keep their
+    // relative offsets, so object-snapping the primary onto a neighbor
+    // translates the whole group by the same snapped delta.
     const dg = dragGroup.current
+    const ddx = x - p.x
+    const ddy = y - (site.d - p.y)
     let nextPositions
     if (dg?.offs) {
       nextPositions = { ...positions, [tag]: { x, y } }
       for (const t of dg.tags) {
         const o = dg.offs[t]
         if (!o) continue
-        let tx = p.x - o.dx
-        let ty = (site.d - p.y) - o.dy
-        if (snap) {
-          tx = Math.round(tx / xt.minorStep) * xt.minorStep
-          ty = Math.round(ty / yt.minorStep) * yt.minorStep
-        }
-        nextPositions[t] = { x: tx, y: ty }
+        nextPositions[t] = { x: p.x - o.dx + ddx, y: (site.d - p.y) - o.dy + ddy }
       }
     } else {
       nextPositions = { ...positions, [tag]: { x, y } }
@@ -1049,6 +1087,7 @@ export default function PlotCanvas({
     setDragVert(null)
     setMeasure(null)
     setZoneDim(null)
+    setSnapPoint(null)
 
     if (zoomStart.current) {
       const rect = wrapRef.current.getBoundingClientRect()
@@ -1348,12 +1387,20 @@ export default function PlotCanvas({
           })}
 
           {/* pipe routing lines aren't part of the DXF export (write_dxf has
-              no CONN layer) — hide them in DXF view for an accurate preview. */}
+              no CONN layer) — hide them in DXF view for an accurate preview.
+              Drawn nozzle-to-nozzle (matching piping_cost()'s formula) when
+              the endpoint defines a nozzle offset, else center-to-center. */}
           {viewMode !== 'dxf' && connections.map((c, i) => {
+            const ea = byTag[c.a]
+            const eb = byTag[c.b]
             const a = positions[c.a]
             const b = positions[c.b]
-            if (!a || !b) return null
-            return <line key={i} x1={a.x} y1={toY(a.y)} x2={b.x} y2={toY(b.y)} className="conn" />
+            if (!a || !b || !ea || !eb) return null
+            const ax = a.x + (ea.nozzle_dx || 0)
+            const ay = a.y + (ea.nozzle_dy || 0)
+            const bx = b.x + (eb.nozzle_dx || 0)
+            const by = b.y + (eb.nozzle_dy || 0)
+            return <line key={i} x1={ax} y1={toY(ay)} x2={bx} y2={toY(by)} className="conn" />
           })}
 
           {equipment.map((e) => {
@@ -1403,6 +1450,12 @@ export default function PlotCanvas({
                 >
                   {e.tag}
                 </text>
+                {(e.nozzle_dx || e.nozzle_dy) && (
+                  <circle
+                    cx={p.x + (e.nozzle_dx || 0)} cy={toY(p.y + (e.nozzle_dy || 0))}
+                    r={0.5} className="nozzle"
+                  />
+                )}
               </g>
             )
           })}
@@ -1421,6 +1474,18 @@ export default function PlotCanvas({
               </g>
             )
           })()}
+
+          {/* Snap indicator: a crosshair at the live snap point, colored by
+              what was snapped to (grid gray / border blue / object amber). Only
+              shown while a drag is actively snapping — hidden in DXF view like
+              the measurement guides (not part of the export). */}
+          {viewMode !== 'dxf' && snapPoint && (
+            <g className={`snap-indicator snap-${snapPoint.kind}`} pointerEvents="none">
+              <line x1={snapPoint.x - 2} y1={toY(snapPoint.y)} x2={snapPoint.x + 2} y2={toY(snapPoint.y)} />
+              <line x1={snapPoint.x} y1={toY(snapPoint.y) - 2} x2={snapPoint.x} y2={toY(snapPoint.y) + 2} />
+              <circle cx={snapPoint.x} cy={toY(snapPoint.y)} r={0.4} />
+            </g>
+          )}
 
           {zoneDim && (() => {
             // Engineering-drawing dimensions: extension/guide lines from the
@@ -1676,6 +1741,8 @@ function EquipEditDialog({ open, equip, onOpenChange, onSave }) {
   const [pinned, setPinned] = useState(false)
   const [pullSide, setPullSide] = useState('')
   const [pullLen, setPullLen] = useState('')
+  const [nozzleDx, setNozzleDx] = useState('')
+  const [nozzleDy, setNozzleDy] = useState('')
 
   useEffect(() => {
     if (!open || !equip) return
@@ -1685,12 +1752,15 @@ function EquipEditDialog({ open, equip, onOpenChange, onSave }) {
     setPinned(!!equip.pinned)
     setPullSide(equip.pull_side || '')
     setPullLen(String(equip.pull_len || 0))
+    setNozzleDx(String(equip.nozzle_dx || 0))
+    setNozzleDy(String(equip.nozzle_dy || 0))
   }, [open, equip])
 
   if (!equip) return null
 
   function apply() {
     const wNum = Number(w), dNum = Number(d), pullLenNum = Number(pullLen)
+    const ndx = Number(nozzleDx), ndy = Number(nozzleDy)
     onSave(equip.tag, {
       cls,
       w: Number.isFinite(wNum) && wNum > 0 ? wNum : equip.w,
@@ -1698,6 +1768,8 @@ function EquipEditDialog({ open, equip, onOpenChange, onSave }) {
       pinned,
       pull_side: pullSide,
       pull_len: pullSide && Number.isFinite(pullLenNum) && pullLenNum > 0 ? pullLenNum : 0,
+      nozzle_dx: Number.isFinite(ndx) ? ndx : 0,
+      nozzle_dy: Number.isFinite(ndy) ? ndy : 0,
     })
     onOpenChange(false)
   }
@@ -1759,6 +1831,22 @@ function EquipEditDialog({ open, equip, onOpenChange, onSave }) {
               <Input
                 id="equip-pull-len" type="number" min="0" step="0.5" value={pullLen}
                 onChange={(e) => setPullLen(e.target.value)} disabled={!pullSide} className="w-24"
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="equip-nozzle-dx" className="text-sm">Nozzle dx (m)</Label>
+              <Input
+                id="equip-nozzle-dx" type="number" step="0.1" value={nozzleDx}
+                onChange={(e) => setNozzleDx(e.target.value)} className="w-24"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="equip-nozzle-dy" className="text-sm">Nozzle dy (m)</Label>
+              <Input
+                id="equip-nozzle-dy" type="number" step="0.1" value={nozzleDy}
+                onChange={(e) => setNozzleDy(e.target.value)} className="w-24"
               />
             </div>
           </div>
