@@ -453,10 +453,10 @@ export default function PlotCanvas({
   data, positions, onPositions, view, setView, showGrid, showRuler, gridStep, snap, tool, setTool,
   viewMode,
   rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth, drawPromptNonce,
-  editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone,
+  editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone, onRenameZone,
   selectedZone, setSelectedZone, editMode,
   selectedEquip, setSelectedEquip, editEquipPromptNonce, onEditEquipment,
-  realtimeMode, relaxLayout, flushRelax,
+  realtimeMode, relaxLayout, flushRelax, onInteractionStart,
 }) {
   const { equipment, connections, site, keepouts, spacing, wind_clearance_m: windClearanceM } = data
   const byTag = Object.fromEntries(equipment.map((e) => [e.tag, e]))
@@ -554,18 +554,45 @@ export default function PlotCanvas({
     return () => ro.disconnect()
   }, [onSize])
 
-  // native non-passive wheel listener so we can preventDefault the page scroll
+  // native non-passive wheel listener so we can preventDefault the page
+  // scroll. ponytail: coalesce a burst of wheel events (a mac trackpad
+  // pinch or Ctrl+wheel fires 60+ small-deltaY events per second) into ONE
+  // zoom per animation frame, with the factor scaled by the accumulated
+  // deltaY — so a tiny trackpad delta gives a tiny zoom step instead of
+  // the old fixed 0.9/1.1 step compounding 60x in a single gesture. The
+  // exp() mapping is the standard map-viewer zoom curve (d3-zoom/leaflet):
+  // perceptually uniform, deltaY sign sets direction, magnitude sets speed.
+  // Cap the exponent so a violent flick can't jump more than ~25% per frame.
   useEffect(() => {
     const el = wrapRef.current
     if (!el) return
+    const ZOOM_SENSITIVITY = 0.0015 // deltaY units -> exponent; tune if still too fast
+    const ZOOM_MAX_EXP = 0.25 // cap per-frame zoom at e^0.25 ≈ 1.28x
+    let acc = 0
+    let px = 0
+    let py = 0
+    let rafId = 0
+    const flush = () => {
+      rafId = 0
+      if (Math.abs(acc) < 1e-6) { acc = 0; return }
+      const exp = Math.sign(acc) * Math.min(Math.abs(acc) * ZOOM_SENSITIVITY, ZOOM_MAX_EXP)
+      const factor = Math.exp(exp)
+      const rect = el.getBoundingClientRect()
+      setView((v) => zoomAt(v, rect, px - rect.left, py - rect.top, factor))
+      acc = 0
+    }
     const onWheel = (e) => {
       e.preventDefault()
-      const rect = el.getBoundingClientRect()
-      const factor = e.deltaY < 0 ? 0.9 : 1.1
-      setView((v) => zoomAt(v, rect, e.clientX - rect.left, e.clientY - rect.top, factor))
+      acc += e.deltaY
+      px = e.clientX
+      py = e.clientY
+      if (!rafId) rafId = requestAnimationFrame(flush)
     }
     el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      if (rafId) cancelAnimationFrame(rafId)
+    }
   }, [setView])
 
   // Delete/Backspace removes the selected zone — only while select tool is
@@ -683,6 +710,7 @@ export default function PlotCanvas({
     setSelectedEquip(tag)
     if (byTag[tag].pinned) return
     dragTag.current = tag
+    onInteractionStart?.()
     capture(ev)
   }
 
@@ -700,6 +728,7 @@ export default function PlotCanvas({
     // a fixed distance behind the cursor as it moves (no jump on first move).
     const wy = site.d - p.y
     dragZone.current = { zone, ox: first[0] - p.x, oy: first[1] - wy }
+    onInteractionStart?.()
     capture(ev)
   }
 
@@ -709,6 +738,7 @@ export default function PlotCanvas({
     ev.stopPropagation()
     setSelectedZone(zone)
     setDragVert({ zone, index })
+    onInteractionStart?.()
     capture(ev)
   }
 
@@ -734,6 +764,7 @@ export default function PlotCanvas({
       px: p.x, py: site.d - p.y,
       perp,
     })
+    onInteractionStart?.()
     capture(ev)
   }
 
@@ -946,6 +977,8 @@ export default function PlotCanvas({
           height="100%"
           viewBox={`${v.x} ${v.y} ${v.w} ${v.h}`}
           preserveAspectRatio="none"
+          role="application"
+          aria-label="Site layout canvas — drag equipment to reposition, switch tools via the ribbon"
           onPointerDown={onPointerDownBg}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
@@ -1170,7 +1203,9 @@ export default function PlotCanvas({
                   fill={viewMode === 'normal' ? (CLASS_COLOR[e.cls] ?? '#888') : 'none'}
                   className={`equip ${e.pinned ? 'pinned' : ''} ${violating ? 'violating' : ''} ${selectedEquip === e.tag ? 'selected' : ''}`}
                   onPointerDown={(ev) => onPointerDownEquip(e.tag, ev)}
-                />
+                >
+                  <title>{e.tag} — {e.cls} {e.w}×{e.d} m{e.pinned ? ' (pinned)' : ''}</title>
+                </rect>
                 <text
                   x={p.x} y={toY(p.y) - e.d / 2 - 0.6}
                   className={`tag ${selectedEquip === e.tag ? 'selected' : ''}`}
@@ -1190,7 +1225,7 @@ export default function PlotCanvas({
               <g className={`measure ${bad ? 'violating' : ''}`}>
                 <line x1={ax} y1={toY(ay)} x2={bx} y2={toY(by)} className="measure-line" />
                 <text x={mx} y={toY(my) - 1.4} className="measure-label">
-                  {fmtM(measure.gap)}m (need {fmtM(measure.need)}m)
+                  {fmtM(measure.gap)}{'\u00a0'}m (need {fmtM(measure.need)}{'\u00a0'}m)
                 </text>
               </g>
             )
@@ -1208,8 +1243,8 @@ export default function PlotCanvas({
             const dimBot = toY(y1) + DIM_OFFSET
             const dimLeft = x1 - DIM_OFFSET
             const dimRight = x2 + DIM_OFFSET
-            const wTxt = `${fmtM(w)} m`
-            const hTxt = `${fmtM(h)} m`
+            const wTxt = `${fmtM(w)}\u00a0m`
+            const hTxt = `${fmtM(h)}\u00a0m`
             const extYTop = [toY(y2) - EXT_GAP, dimTop - EXT_OVER]
             const extYBot = [toY(y1) + EXT_GAP, dimBot + EXT_OVER]
             const extXLeft = [x1 - EXT_GAP, dimLeft - EXT_OVER]
@@ -1316,7 +1351,7 @@ export default function PlotCanvas({
           zone={selectedZone}
           keepouts={keepouts}
           onOpenChange={setEditOpen}
-          onRename={onEditZone}
+          onRename={onRenameZone ?? onEditZone}
           onDelete={(name) => { onDeleteZone(name); setSelectedZone(null); setEditOpen(false) }}
         />
 

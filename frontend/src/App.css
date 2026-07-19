@@ -73,6 +73,30 @@
   --office-ribbon-hover: #3a3d42;
   --office-ribbon-sep: #3a3a3a;
   --app-backdrop: #18181a;
+  color-scheme: dark;
+}
+
+/* ponytail: skip-link for keyboard users — visually hidden until focused,
+   then floats top-left so Tab from the URL bar lands here before the ribbon.
+   The target #canvas-main is the <main> landmark in App.jsx. */
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -2.5rem;
+  z-index: 100;
+  padding: 0.4rem 0.75rem;
+  background: var(--office-accent);
+  color: #fff;
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  text-decoration: none;
+  transition: top 0.12s ease-out;
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  top: 0.5rem;
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }
 
 .ribbon-shell {
@@ -375,10 +399,37 @@
   color: inherit;
   font: inherit;
   cursor: pointer;
+  border-radius: 3px;
 }
 
 .zoom-pct-btn:hover {
   text-decoration: underline;
+}
+
+.zoom-pct-btn:focus-visible {
+  outline: 2px solid var(--office-accent);
+  outline-offset: 2px;
+}
+
+.zoom-slider:focus-visible {
+  outline: 2px solid var(--office-accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ponytail: honor prefers-reduced-motion globally — the only motion in the
+   app today is the solve progress bar's width transition, the ribbon's
+   background/color hovers, the skip-link slide, and the Loader2 spin. None
+   carry information; freeze them for users who asked for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ---- the SVG plot itself ------------------------------------------------ */

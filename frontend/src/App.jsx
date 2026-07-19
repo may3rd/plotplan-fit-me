@@ -3,11 +3,74 @@ import { Loader2 } from 'lucide-react'
 import PlotCanvas from '@/components/PlotCanvas'
 import Ribbon from '@/components/Ribbon'
 import StatusBar from '@/components/StatusBar'
-import { rotateSide } from '@/lib/geom'
+import {
+  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { rotatePolyCW, rotateSide } from '@/lib/geom'
 import { buildCaseData, BLANK_PROJECT, parseProjectFile, projectFileContents } from '@/lib/project'
 import { downloadRaster } from '@/lib/raster'
 import { fitView, reaspect, zoomAt, zoomPercent } from '@/lib/view'
 import './App.css'
+
+// ponytail: one shared notice dialog for every place that used to call
+// window.alert — open-file error, Help, About. Caller sets
+// `{title, body}` state and this renders; closing clears it. body may be a
+// string (whitespace-pre-line preserves the \n-joined lines) or JSX.
+function NoticeDialog({ notice, onClose }) {
+  return (
+    <Dialog open={!!notice} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent>
+        {notice && (
+          <>
+            <DialogHeader><DialogTitle>{notice.title}</DialogTitle></DialogHeader>
+            <div className="text-sm text-muted-foreground whitespace-pre-line">
+              {notice.body}
+            </div>
+            <DialogFooter>
+              <Button onClick={onClose}>OK</Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ponytail: replaces window.prompt for Save As — a controlled dialog with a
+// text input + OK/Cancel; the only prompt left in the app. Validates
+// non-empty, appends .json if missing.
+function SaveAsDialog({ open, initial, onCancel, onConfirm }) {
+  const [name, setName] = useState(initial ?? '')
+  useEffect(() => { if (open) setName(initial ?? '') }, [open, initial])
+  function apply() {
+    const n = name.trim()
+    if (!n) return
+    onConfirm(n.endsWith('.json') ? n : `${n}.json`)
+  }
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onCancel() }}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>Save project as</DialogTitle></DialogHeader>
+        <div className="flex items-center gap-2">
+          <Label htmlFor="saveas-name" className="text-sm">File name</Label>
+          <Input
+            id="saveas-name" value={name} autoFocus
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') apply() }}
+            className="flex-1"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>Cancel</Button>
+          <Button onClick={apply}>Save</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 function App() {
   const [units, setUnits] = useState([])
@@ -20,6 +83,10 @@ function App() {
   const [solving, setSolving] = useState(false)
   const [solveProgress, setSolveProgress] = useState(null) // {fraction, seed, seed_index, seed_count} | null
   const [cases, setCases] = useState(null) // [{seed, cost, equipment}, ...] from the last solve, best cost first
+  const [notice, setNotice] = useState(null) // {title, body} | null — drives NoticeDialog (replaces window.alert)
+  const [saveAsOpen, setSaveAsOpen] = useState(false) // Save-As prompt dialog (replaces window.prompt)
+  const [loadError, setLoadError] = useState(null) // {message} | null — unit-list fetch failed
+  const dirtyRef = useRef(false) // true once the user edits positions/data past the last save/load
 
   // view / canvas state
   const [view, setView] = useState(null) // SVG viewBox {x,y,w,h}, null until fitted
@@ -44,6 +111,121 @@ function App() {
   const bumpEditEquipPrompt = useCallback(() => setEditEquipPromptNonce((n) => n + 1), [])
   const [selectedZone, setSelectedZone] = useState(null) // currently selected keep-out/road/rack zone
   const [selectedEquip, setSelectedEquip] = useState(null) // currently selected equipment tag
+
+  // ponytail: one helper for "this mutation dirties the doc" — every
+  // user-driven setData/setPositions path that isn't a fresh load calls this.
+  // A ref (not state) because beforeunload only needs the latest value at
+  // unload time, and we don't want a re-render on every drag frame.
+  const markDirty = useCallback(() => { dirtyRef.current = true }, [])
+  const markClean = useCallback(() => { dirtyRef.current = false }, [])
+
+  // ---- undo / redo ---------------------------------------------------------
+  // ponytail: undo/redo over the (data, positions) pair. Two stacks of
+  // snapshots; current state is NOT in either stack. commit() snapshots
+  // the CURRENT state onto `past` before a mutation changes it, so undo
+  // can restore it. A continuous drag commits once at pointer-down
+  // (PlotCanvas calls onInteractionStart); live drag frames don't commit.
+  // History is cleared by load/new (resetHistory) so a freshly-opened
+  // project starts with an empty undo past, not "undo back to a blank
+  // project from 20 edits ago." Cap past at 100 to bound memory; the most
+  // common operation count that matters is the last few, not hundreds.
+  // Both stacks are refs (mutated, not via state updaters) so undo/redo
+  // can do their setData/setPositions side effects OUTSIDE any React
+  // updater — StrictMode double-invokes updaters in dev, which would
+  // otherwise apply a step twice. A separate canUndo/canRedo state just
+  // forces the ribbon's disabled buttons to re-render after a step.
+  const HISTORY_CAP = 100
+  const pastRef = useRef([]) // [{data, positions}] older than current
+  const futureRef = useRef([]) // [{data, positions}] newer than current
+  const [histVer, setHistVer] = useState(0) // bump to re-render ribbon buttons
+  const bumpHist = useCallback(() => setHistVer((n) => n + 1), [])
+
+  const snapshot = useCallback(() => {
+    if (!data) return null
+    return { data, positions: { ...positions } }
+  }, [data, positions])
+
+  const commit = useCallback(() => {
+    const snap = snapshot()
+    if (!snap) return
+    pastRef.current = [...pastRef.current.slice(-HISTORY_CAP + 1), snap]
+    futureRef.current = [] // any new commit clears the redo branch
+    bumpHist()
+  }, [snapshot, bumpHist])
+
+  const undo = useCallback(() => {
+    if (!pastRef.current.length) return
+    const prev = pastRef.current[pastRef.current.length - 1]
+    const cur = snapshot()
+    pastRef.current = pastRef.current.slice(0, -1)
+    if (cur) futureRef.current = [cur, ...futureRef.current].slice(0, HISTORY_CAP)
+    setData(prev.data)
+    setPositions(prev.positions)
+    setScore(null)
+    setSelectedZone(null)
+    setSelectedEquip(null)
+    markDirty()
+    bumpHist()
+  }, [snapshot, markDirty, bumpHist])
+
+  const redo = useCallback(() => {
+    if (!futureRef.current.length) return
+    const [next, ...rest] = futureRef.current
+    const cur = snapshot()
+    if (cur) pastRef.current = [...pastRef.current.slice(-HISTORY_CAP + 1), cur]
+    futureRef.current = rest
+    setData(next.data)
+    setPositions(next.positions)
+    setScore(null)
+    setSelectedZone(null)
+    setSelectedEquip(null)
+    markDirty()
+    bumpHist()
+  }, [snapshot, markDirty, bumpHist])
+
+  const resetHistory = useCallback(() => {
+    pastRef.current = []
+    futureRef.current = []
+    bumpHist()
+  }, [bumpHist])
+
+  const canUndo = pastRef.current.length > 0
+  const canRedo = futureRef.current.length > 0
+  // histVer is read here only to make this line depend on it so it
+  // recomputes after bumpHist; the values come from the refs.
+  void histVer
+
+  // ponytail: ⌘Z / Ctrl+Z undo, ⇧⌘Z / Ctrl+Y redo. Active only when not
+  // typing in an input/dialog and not while a solve is running. Bound on
+  // window (single source of truth, matches the existing Delete/Esc
+  // handlers in PlotCanvas) — same pattern, no new keymap system.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const mod = e.metaKey || e.ctrlKey
+      if (!mod || e.key !== 'z' && e.key !== 'Z' && e.key !== 'y' && e.key !== 'Y') return
+      const tag = document.activeElement?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return
+      e.preventDefault()
+      const isRedo = e.key === 'y' || e.key === 'Y' || e.shiftKey
+      if (isRedo) redo()
+      else undo()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [undo, redo])
+
+  // beforeunload guard: warn before closing/reloading the tab with unsaved
+  // edits. Browsers ignore the custom message and show their own string, so
+  // the text is generic — the presence of a returnValue is what triggers it.
+  useEffect(() => {
+    const onBeforeUnload = (e) => {
+      if (!dirtyRef.current) return
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [])
 
   // switching tool mode (Select / Pan / Edit, or a draw-* tool) makes
   // whatever was selected under the OLD mode stale — e.g. an equipment
@@ -73,7 +255,9 @@ function App() {
     setScore(null)
     setCases(null)
     setSelectedEquip(null)
-  }, [])
+    markClean()
+    resetHistory()
+  }, [markClean, resetHistory])
 
   // Tools > Customize UI theme picker: 'dark'/'light' force the .dark class
   // (the shadcn/ui dark palette already defined in index.css/App.css, just
@@ -92,10 +276,13 @@ function App() {
   }, [theme])
 
   useEffect(() => {
-    fetch('/api/units').then((r) => r.json()).then((names) => {
-      setUnits(names)
-      if (names.length) setUnitName(names[0])
-    })
+    fetch('/api/units')
+      .then((r) => r.json())
+      .then((names) => {
+        setUnits(names)
+        if (names.length) setUnitName(names[0])
+      })
+      .catch((err) => setLoadError({ message: err.message || String(err) }))
   }, [])
 
   useEffect(() => {
@@ -145,7 +332,8 @@ function App() {
   const onPositions = useCallback((next) => {
     setPositions(next)
     scoreLayout(next)
-  }, [scoreLayout])
+    markDirty()
+  }, [scoreLayout, markDirty])
 
   // Merge solver-driven shape changes (w/d/pull_side — the SA rotate move
   // and CP-SAT's ROT var can both flip an item's orientation while
@@ -246,19 +434,26 @@ function App() {
   // changing `data` here re-triggers the scoreLayout effect below, since a
   // zone can flip feasibility just like moving equipment can.
   const addZone = useCallback((name, poly) => {
+    commit()
     setData((d) => ({ ...d, keepouts: { ...d.keepouts, [name]: poly } }))
-  }, [])
+    markDirty()
+  }, [commit, markDirty])
 
   const deleteZone = useCallback((name) => {
+    commit()
     setData((d) => {
       const keepouts = { ...d.keepouts }
       delete keepouts[name]
       return { ...d, keepouts }
     })
-  }, [])
+    markDirty()
+  }, [commit, markDirty])
 
   // edit a keepouts zone: update its polygon (drag a vertex) and/or rename it
   // (which changes its role/layer per the backend's zone-name convention).
+  // No commit() here — the polygon-drag path commits once at pointer-down
+  // via onInteractionStart (see PlotCanvas), and the rename path commits
+  // explicitly in ZoneEditDialog's apply (passed as onRenameZoneCommit).
   const editZone = useCallback((name, poly, nextName) => {
     setData((d) => {
       const keepouts = { ...d.keepouts }
@@ -270,7 +465,15 @@ function App() {
       }
       return { ...d, keepouts }
     })
-  }, [])
+    markDirty()
+  }, [markDirty])
+
+  // rename-only entry point used by the Zone edit dialog's Apply button —
+  // a discrete, non-drag edit, so it commits a snapshot first.
+  const renameZone = useCallback((name, poly, nextName) => {
+    commit()
+    editZone(name, poly, nextName)
+  }, [commit, editZone])
 
   // Ribbon's Delete button: remove the selected zone and clear the selection.
   const deleteSelectedZone = useCallback((name) => {
@@ -284,6 +487,7 @@ function App() {
   // item's own center doesn't move it. Changing `data` here re-triggers the
   // scoreLayout effect below, same as addZone/editZone.
   const rotateEquipment = useCallback((tag, deg) => {
+    commit()
     setData((d) => ({
       ...d,
       equipment: d.equipment.map((e) => {
@@ -297,7 +501,8 @@ function App() {
         }
       }),
     }))
-  }, [])
+    markDirty()
+  }, [commit, markDirty])
 
   // Ribbon's Object > Edit dialog: patch the selected equipment's own
   // fields (class/size/pinned/pull clearance). Deliberately does NOT
@@ -307,17 +512,20 @@ function App() {
   // class of bug for a field that's really just an identifier, not a
   // "property" of the equipment the way class/size/pinned are.
   const editEquipment = useCallback((tag, patch) => {
+    commit()
     setData((d) => ({
       ...d,
       equipment: d.equipment.map((e) => (e.tag === tag ? { ...e, ...patch } : e)),
     }))
-  }, [])
+    markDirty()
+  }, [commit, markDirty])
 
   // Ribbon's Object > Remove button: drop the equipment itself, its
   // position, and any connection referencing it (a dangling connection
   // would otherwise crash the next Score/Solve call server-side, since
   // piping_cost() looks up both ends by tag with no missing-tag guard).
   const removeEquipment = useCallback((tag) => {
+    commit()
     setData((d) => ({
       ...d,
       equipment: d.equipment.filter((e) => e.tag !== tag),
@@ -329,7 +537,33 @@ function App() {
       return next
     })
     setSelectedEquip(null)
-  }, [])
+    markDirty()
+  }, [commit, markDirty])
+
+  // Ribbon's Zone > Rotate: rotate the selected zone's polygon 90/270° CW
+  // about its centroid. Purely a polygon edit — a zone's role/layer comes
+  // from its NAME prefix (RACK*/ROAD*/MAINT*), not its orientation, so
+  // unlike the equipment rotate there's no pull_side to cycle. Roads/racks
+  // are centerline+width rectangles, so a 90° rotate just swaps which axis
+  // the centerline runs along; for a generic keep-out the whole shape turns.
+  const rotateZone = useCallback((name, deg) => {
+    commit()
+    setData((d) => {
+      const poly = d.keepouts?.[name]
+      if (!poly) return d
+      return { ...d, keepouts: { ...d.keepouts, [name]: rotatePolyCW(poly, deg) } }
+    })
+    markDirty()
+  }, [commit, markDirty])
+
+  // ponytail: the canvas calls this at the START of a continuous drag
+  // (equipment move, zone move, vertex/edge resize) so the undo history
+  // captures the layout as it was BEFORE the drag began — one snapshot
+  // for the whole drag, not one per pointermove frame (which would fill
+  // the stack with 100 near-identical micro-states from a single gesture).
+  const onInteractionStart = useCallback(() => {
+    commit()
+  }, [commit])
 
   const zoomCenter = useCallback((factor) => {
     if (!csize?.width) return
@@ -405,12 +639,14 @@ function App() {
         }
       }
       if (!result) throw new Error('solve stream ended without a result')
+      commit()
       const pos = {}
       for (const e of result.equipment) pos[e.tag] = { x: e.x, y: e.y }
       setPositions(pos)
       applyRotations(result.equipment)
       setScore({ feasible: true, cost: result.cost })
       setCases(result.cases)
+      markDirty()
     } catch (err) {
       // ponytail: an aborted fetch (stopSolve's doing) is an intentional
       // cancel, not a failure — the backend's should_stop already returns
@@ -436,11 +672,13 @@ function App() {
   // rotations, score), so switching between cases is just as cheap/
   // reversible as a normal drag or re-solve.
   function applyCase(c) {
+    commit()
     const pos = {}
     for (const e of c.equipment) pos[e.tag] = { x: e.x, y: e.y }
     setPositions(pos)
     applyRotations(c.equipment)
     setScore({ feasible: true, cost: c.cost })
+    markDirty()
   }
 
   async function downloadResponse(url, fallbackName) {
@@ -496,63 +734,101 @@ function App() {
         setUnitName(null)
         setFileName(file.name)
       } catch (err) {
-        window.alert(`Couldn't open "${file.name}": ${err.message}`)
+        setNotice({
+          title: `Couldn't open "${file.name}"`,
+          body: err.message || String(err),
+        })
       }
     }
     reader.readAsText(file)
   }
 
   function saveProject() {
-    if (fileName) downloadText(projectFileContents(data, positions), fileName)
-    else saveProjectAs()
+    if (fileName) {
+      downloadText(projectFileContents(data, positions), fileName)
+      markClean()
+    } else {
+      setSaveAsOpen(true)
+    }
   }
 
   function saveProjectAs() {
-    const suggested = fileName ?? `${data.name || 'layout'}.json`
-    const name = window.prompt('Save project as:', suggested)
-    if (!name) return
-    const finalName = name.endsWith('.json') ? name : `${name}.json`
+    setSaveAsOpen(true)
+  }
+
+  function confirmSaveAs(finalName) {
     downloadText(projectFileContents(data, positions), finalName)
     setFileName(finalName)
+    setSaveAsOpen(false)
+    markClean()
+  }
+
+  if (loadError) {
+    return (
+      <div
+        className="flex h-screen flex-col items-center justify-center gap-3 text-muted-foreground"
+        aria-live="polite"
+      >
+        <p>Couldn't reach the backend.</p>
+        <p className="text-xs">{loadError.message}</p>
+        <Button variant="outline" size="sm" onClick={() => {
+          setLoadError(null)
+          window.location.reload()
+        }}>
+          Retry
+        </Button>
+      </div>
+    )
   }
 
   if (!data) {
     return (
-      <div className="flex h-screen items-center justify-center text-muted-foreground">
-        <Loader2 className="mr-2 size-4 animate-spin" /> Loading…
+      <div
+        className="flex h-screen items-center justify-center text-muted-foreground"
+        aria-live="polite"
+      >
+        <Loader2 className="mr-2 size-4 animate-spin" aria-hidden="true" /> Loading…
       </div>
     )
   }
 
   return (
     <div className="app-shell">
-      <Ribbon
-        units={units} unitName={unitName} setUnitName={setUnitName}
-        caseCount={caseCount} setCaseCount={setCaseCount}
-        solve={solve} stopSolve={stopSolve} solving={solving} cases={cases} applyCase={applyCase}
-        showGrid={showGrid} setShowGrid={setShowGrid}
-        showRuler={showRuler} setShowRuler={setShowRuler}
-        gridStep={gridStep} setGridStep={setGridStep}
-        snap={snap} setSnap={setSnap}
-        viewMode={viewMode} setViewMode={setViewMode}
-        tool={tool} setTool={setTool} bumpDrawPrompt={bumpDrawPrompt} fit={fit}
-        bumpEditPrompt={bumpEditPrompt} selectedZone={selectedZone} deleteZone={deleteSelectedZone}
-        selectedEquip={selectedEquip} rotateEquipment={rotateEquipment}
-        bumpEditEquipPrompt={bumpEditEquipPrompt} removeEquipment={removeEquipment}
-        zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
-        newProject={newProject} openProject={openProject}
-        saveProject={saveProject} saveProjectAs={saveProjectAs}
-        exportDxf={exportDxf} exportTakeoff={exportTakeoff} exportRaster={exportRaster}
-        theme={theme} setTheme={setTheme}
-        rackWidth={rackWidth} setRackWidth={setRackWidth}
-        rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
-        roadWidth={roadWidth} setRoadWidth={setRoadWidth}
-        realtimeMode={realtimeMode} setRealtimeMode={toggleRealtimeMode}
-      />
+      <a href="#canvas-main" className="skip-link">Skip to canvas</a>
+      <h1 className="sr-only">Plotplan Fit Me — refinery plot planner</h1>
 
-      <main className="canvas-area">
+      <header>
+        <Ribbon
+          units={units} unitName={unitName} setUnitName={setUnitName}
+          caseCount={caseCount} setCaseCount={setCaseCount}
+          solve={solve} stopSolve={stopSolve} solving={solving} cases={cases} applyCase={applyCase}
+          showGrid={showGrid} setShowGrid={setShowGrid}
+          showRuler={showRuler} setShowRuler={setShowRuler}
+          gridStep={gridStep} setGridStep={setGridStep}
+          snap={snap} setSnap={setSnap}
+          viewMode={viewMode} setViewMode={setViewMode}
+          tool={tool} setTool={setTool} bumpDrawPrompt={bumpDrawPrompt} fit={fit}
+          bumpEditPrompt={bumpEditPrompt} selectedZone={selectedZone} deleteZone={deleteSelectedZone}
+          selectedEquip={selectedEquip} rotateEquipment={rotateEquipment} rotateZone={rotateZone}
+          bumpEditEquipPrompt={bumpEditEquipPrompt} removeEquipment={removeEquipment}
+          zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
+          newProject={newProject} openProject={openProject}
+          saveProject={saveProject} saveProjectAs={saveProjectAs}
+          exportDxf={exportDxf} exportTakeoff={exportTakeoff} exportRaster={exportRaster}
+          theme={theme} setTheme={setTheme}
+          rackWidth={rackWidth} setRackWidth={setRackWidth}
+          rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
+          roadWidth={roadWidth} setRoadWidth={setRoadWidth}
+          realtimeMode={realtimeMode} setRealtimeMode={toggleRealtimeMode}
+          setNotice={setNotice}
+          undo={undo} redo={redo} canUndo={canUndo} canRedo={canRedo}
+        />
+      </header>
+
+      <main className="canvas-area" id="canvas-main" aria-label="Site layout canvas">
         {solving && solveProgress && (
           <div className="solve-progress" aria-busy="true" role="progressbar"
+               aria-label="Solve progress"
                aria-valuenow={Math.round(solveProgress.fraction * 100)}
                aria-valuemin={0} aria-valuemax={100}>
             <div className="solve-progress-bar"
@@ -576,9 +852,10 @@ function App() {
           editPromptNonce={editPromptNonce}
           editEquipPromptNonce={editEquipPromptNonce} onEditEquipment={editEquipment}
           onCursor={setCursor} onSize={setCsize}
-          onAddZone={addZone} onDeleteZone={deleteZone} onEditZone={editZone}
+          onAddZone={addZone} onDeleteZone={deleteZone} onEditZone={editZone} onRenameZone={renameZone}
           selectedZone={selectedZone} setSelectedZone={setSelectedZone}
           selectedEquip={selectedEquip} setSelectedEquip={setSelectedEquip}
+          onInteractionStart={onInteractionStart}
         />
       </main>
 
@@ -587,6 +864,14 @@ function App() {
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
         tool={tool} realtimeMode={realtimeMode} relaxOk={relaxOk}
         data={data} positions={positions} selectedEquip={selectedEquip}
+      />
+
+      <NoticeDialog notice={notice} onClose={() => setNotice(null)} />
+      <SaveAsDialog
+        open={saveAsOpen}
+        initial={fileName ?? `${data.name || 'layout'}.json`}
+        onCancel={() => setSaveAsOpen(false)}
+        onConfirm={confirmSaveAs}
       />
     </div>
   )

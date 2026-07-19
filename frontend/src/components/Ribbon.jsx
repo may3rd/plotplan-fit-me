@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Magnet,
-  MousePointer2, Palette, Pause, Pencil, Play, RotateCw, Ruler, Save, Search, Settings as SettingsIcon,
-  Trash2, Zap,
+  MousePointer2, Palette, Pause, Pencil, Play, Redo2, RotateCw, Ruler, Save, Search,
+  Settings as SettingsIcon, Trash2, Undo2, Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -53,7 +53,7 @@ export function ZoomDialog({ zoomPct, setZoomPercent, trigger }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        {trigger ?? <Button variant="outline" size="icon" title="Zoom"><Search /></Button>}
+        {trigger ?? <Button variant="outline" size="icon" title="Zoom" aria-label="Zoom"><Search /></Button>}
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -100,7 +100,7 @@ function ResultsDialog({ cases, applyCase }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="icon" title="Case results">
+        <Button variant="ghost" size="icon" title="Case results" aria-label="Case results">
           <ListOrdered className="size-4" />
         </Button>
       </DialogTrigger>
@@ -152,7 +152,7 @@ function CustomizeUiDialog({ theme, setTheme }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline" size="icon" title="Customize UI"><Palette /></Button>
+        <Button variant="outline" size="icon" title="Customize UI" aria-label="Customize UI"><Palette /></Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -180,31 +180,44 @@ function CustomizeUiDialog({ theme, setTheme }) {
 
 // App-wide defaults for road/rack drawing — same values the draw-prompt
 // dialog (Insert > Draw road/rack) seeds itself from, editable here without
-// having to start drawing a zone first.
+// having to start drawing a zone first. Also covers the grid/ruler view
+// preferences (on/off, and a fixed grid major-tick step in meters; blank
+// means "auto", same as the View tab's Auto button).
 function SettingsDialog({
   rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth,
+  showGrid, setShowGrid, showRuler, setShowRuler, gridStep, setGridStep,
 }) {
   const [open, setOpen] = useState(false)
   const [rw, setRw] = useState(rackWidth)
   const [rbs, setRbs] = useState(rackBeamSpacing)
   const [rdw, setRdw] = useState(roadWidth)
+  const [g, setG] = useState(showGrid)
+  const [r, setR] = useState(showRuler)
+  const [gs, setGs] = useState(gridStep ?? '')
 
   useEffect(() => {
-    if (open) { setRw(rackWidth); setRbs(rackBeamSpacing); setRdw(roadWidth) }
-  }, [open, rackWidth, rackBeamSpacing, roadWidth])
+    if (open) {
+      setRw(rackWidth); setRbs(rackBeamSpacing); setRdw(roadWidth)
+      setG(showGrid); setR(showRuler); setGs(gridStep ?? '')
+    }
+  }, [open, rackWidth, rackBeamSpacing, roadWidth, showGrid, showRuler, gridStep])
 
   function apply() {
     const w = Number(rw), b = Number(rbs), d = Number(rdw)
     if (Number.isFinite(w) && w > 0) setRackWidth(w)
     if (Number.isFinite(b) && b > 0) setRackBeamSpacing(b)
     if (Number.isFinite(d) && d > 0) setRoadWidth(d)
+    setShowGrid(g)
+    setShowRuler(r)
+    const gsn = Number(gs)
+    setGridStep(gs === '' || !Number.isFinite(gsn) || gsn <= 0 ? null : gsn)
     setOpen(false)
   }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline" size="icon" title="Settings"><SettingsIcon /></Button>
+        <Button variant="outline" size="icon" title="Settings" aria-label="Settings"><SettingsIcon /></Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -232,6 +245,24 @@ function SettingsDialog({
               onChange={(e) => setRdw(e.target.value)} className="w-24"
             />
           </div>
+          <div className="my-1 h-px bg-border" />
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={g} onChange={(e) => setG(e.target.checked)} />
+            Show grid
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={r} onChange={(e) => setR(e.target.checked)} />
+            Show rulers
+          </label>
+          <div className="flex items-center gap-2">
+            <Label htmlFor="set-grid-step" className="w-44 text-sm">Grid spacing (m, blank = auto)</Label>
+            <Input
+              id="set-grid-step" type="number" min="0.1" step="1" placeholder="auto…"
+              value={gs}
+              onChange={(e) => setGs(e.target.value)}
+              className="w-24"
+            />
+          </div>
         </div>
         <DialogFooter>
           <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
@@ -249,11 +280,13 @@ export default function Ribbon(props) {
     viewMode, setViewMode,
     tool, setTool, bumpDrawPrompt, fit, zoomPct, setZoomPercent,
     bumpEditPrompt, selectedZone, deleteZone,
-    selectedEquip, rotateEquipment, bumpEditEquipPrompt, removeEquipment,
+    selectedEquip, rotateEquipment, rotateZone, bumpEditEquipPrompt, removeEquipment,
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
     theme, setTheme,
     rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth,
     realtimeMode, setRealtimeMode,
+    setNotice,
+    undo, redo, canUndo, canRedo,
   } = props
 
   const openInputRef = useRef(null)
@@ -290,8 +323,8 @@ export default function Ribbon(props) {
         {/* single Word-style row: File menu, the ribbon tabs, then Help menu
             pushed to the right — no separate menu-bar strip above the tabs. */}
         <div className="ribbon-tabrow">
-          <LayoutGrid className="app-icon" />
-          <Menubar className="titlebar-menubar border-0 bg-transparent p-0 shadow-none">
+          <LayoutGrid className="app-icon" aria-hidden="true" />
+          <Menubar className="titlebar-menubar border-0 bg-transparent p-0 shadow-none" aria-label="File menu">
             <MenubarMenu>
               <MenubarTrigger>File</MenubarTrigger>
               <MenubarContent>
@@ -321,7 +354,7 @@ export default function Ribbon(props) {
             </MenubarMenu>
           </Menubar>
 
-          <TabsList variant="line" className="ribbon-tablist">
+          <TabsList variant="line" className="ribbon-tablist" aria-label="Ribbon sections">
             <TabsTrigger value="home">Home</TabsTrigger>
             <TabsTrigger value="insert">Insert</TabsTrigger>
             <TabsTrigger value="view">View</TabsTrigger>
@@ -334,23 +367,29 @@ export default function Ribbon(props) {
             )}
           </TabsList>
 
-          <Menubar className="titlebar-menubar ml-auto border-0 bg-transparent p-0 shadow-none">
+          <Menubar className="titlebar-menubar ml-auto border-0 bg-transparent p-0 shadow-none" aria-label="Help menu">
             <MenubarMenu>
               <MenubarTrigger>Help</MenubarTrigger>
               <MenubarContent align="end">
                 <MenubarItem
                   onSelect={() =>
-                    window.alert(
-                      'plotplan-fit-me — generative plot plan tool for refinery/petrochemical unit '
-                      + 'layout.\n\nPick a Case Study (or File > New), drag equipment for a live '
-                      + 'score, or Solve to auto-lay-out. Insert > Draw lets you add roads and pipe '
-                      + 'racks directly on the canvas.',
-                    )}
+                    setNotice?.({
+                      title: 'Plotplan Fit Me Help',
+                      body:
+                        'Generative plot plan tool for refinery/petrochemical unit layout.\n\n'
+                        + 'Pick a Case Study (or File > New), drag equipment for a live '
+                        + 'score, or Solve to auto-lay-out. Insert > Draw lets you add roads '
+                        + 'and pipe racks directly on the canvas.',
+                    })
+                  }
                 >
                   Plotplan Fit Me Help
                 </MenubarItem>
                 <MenubarItem
-                  onSelect={() => window.alert('Plotplan Fit Me\nGenerative plot plan layout tool.')}
+                  onSelect={() => setNotice?.({
+                    title: 'About Plotplan Fit Me',
+                    body: 'Generative plot plan layout tool.',
+                  })}
                 >
                   <Info className="size-4" /> About
                 </MenubarItem>
@@ -362,7 +401,7 @@ export default function Ribbon(props) {
         <TabsContent value="home" className="ribbon-body">
           <Group label="Case Study">
             <Select value={unitName ?? ''} onValueChange={setUnitName}>
-              <SelectTrigger className="w-48"><SelectValue placeholder="Select a unit" /></SelectTrigger>
+              <SelectTrigger className="w-48" aria-label="Case study"><SelectValue placeholder="Select a unit" /></SelectTrigger>
               <SelectContent>
                 {units.map((u) => <SelectItem key={u} value={u}>{u}</SelectItem>)}
               </SelectContent>
@@ -373,48 +412,51 @@ export default function Ribbon(props) {
             <ToggleGroup type="single" variant="outline" value={tool}
               onValueChange={(v) => v && setTool(v)}
             >
-              <ToggleGroupItem value="select" title="Select / Move"><MousePointer2 /></ToggleGroupItem>
-              <ToggleGroupItem value="pan" title="Pan"><Hand /></ToggleGroupItem>
-              <ToggleGroupItem value="edit" title="Edit — drag roads, pipe racks, and other zones to move them"><Pencil /></ToggleGroupItem>
+              <ToggleGroupItem value="select" title="Select / Move" aria-label="Select / Move"><MousePointer2 /></ToggleGroupItem>
+              <ToggleGroupItem value="pan" title="Pan" aria-label="Pan"><Hand /></ToggleGroupItem>
+              <ToggleGroupItem value="edit" title="Edit — drag roads, pipe racks, and other zones to move them" aria-label="Edit — drag roads, pipe racks, and other zones to move them"><Pencil /></ToggleGroupItem>
             </ToggleGroup>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
-          <Group label="Rotate">
+          <Group label="History">
             <Button
-              variant="outline" size="icon" disabled={!selectedEquip}
-              onClick={() => rotateEquipment(selectedEquip, 90)} title="Rotate selected equipment 90° CW"
+              variant="outline" size="icon" disabled={!canUndo} onClick={undo}
+              title="Undo (Ctrl+Z)" aria-label="Undo"
             >
-              <RotateCw />
+              <Undo2 />
             </Button>
             <Button
-              variant="outline" size="icon" disabled={!selectedEquip}
-              onClick={() => rotateEquipment(selectedEquip, 270)} title="Rotate selected equipment 270° CW (90° CCW)"
+              variant="outline" size="icon" disabled={!canRedo} onClick={redo}
+              title="Redo (Ctrl+Shift+Z)" aria-label="Redo"
             >
-              <RotateCw className="-scale-x-100" />
+              <Redo2 />
             </Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Zoom">
             <ZoomDialog zoomPct={zoomPct} setZoomPercent={setZoomPercent} />
-            <Button variant="outline" size="icon" onClick={fit} title="Fit width"><ArrowLeftRight /></Button>
+            <Button variant="outline" size="icon" onClick={fit} title="Fit width" aria-label="Fit width"><ArrowLeftRight /></Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Solve">
             <Button
               onClick={solving ? stopSolve : solve} className="solve-btn flex-col gap-1 px-4"
               title={solving ? 'Stop solving' : 'Solve'}
+              aria-label={solving ? 'Stop solving' : 'Solve'}
             >
-              {solving ? <Pause className="size-5" /> : <Play className="size-5" />}
+              {solving ? <Pause className="size-5" aria-hidden="true" /> : <Play className="size-5" aria-hidden="true" />}
             </Button>
             <ResultsDialog cases={cases} applyCase={applyCase} />
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Cases">
             <div className="flex flex-col gap-1">
+              <Label htmlFor="cases" className="sr-only">Cases to try</Label>
               <Input
                 id="cases" type="number" min="1" step="1" value={caseCount}
                 onChange={(e) => setCaseCount(e.target.value)}
-                title="how many randomly-seeded cases to try" className="w-16"
+                title="How many randomly-seeded cases to try"
+                aria-label="How many randomly-seeded cases to try" className="w-16"
               />
             </div>
           </Group>
@@ -422,7 +464,7 @@ export default function Ribbon(props) {
           <Group label="Real-time">
             <Toggle
               variant="outline" pressed={realtimeMode} onPressedChange={setRealtimeMode}
-              title="Real-time move — reflow the layout live around a dragged item (POST /api/relax) instead of just scoring it"
+              title="Real-time move — reflow the layout live around a dragged item (POST /api/relax) instead of just scoring it" aria-label="Real-time move — reflow the layout live around a dragged item (POST /api/relax) instead of just scoring it"
             >
               <Zap />
             </Toggle>
@@ -433,38 +475,38 @@ export default function Ribbon(props) {
           <Group label="Draw zone">
             <Button
               variant={tool === 'draw-road' ? 'default' : 'outline'} size="icon"
-              onClick={() => { setTool('draw-road'); bumpDrawPrompt() }} title="Draw road"
+              onClick={() => { setTool('draw-road'); bumpDrawPrompt() }} title="Draw road" aria-label="Draw road"
             >
               <span className="font-bold">R</span>
             </Button>
             <Button
               variant={tool === 'draw-rack' ? 'default' : 'outline'} size="icon"
-              onClick={() => { setTool('draw-rack'); bumpDrawPrompt() }} title="Draw pipe rack"
+              onClick={() => { setTool('draw-rack'); bumpDrawPrompt() }} title="Draw pipe rack" aria-label="Draw pipe rack"
             >
               <span className="font-bold">P</span>
             </Button>
             <Button
               variant={tool === 'draw-maint' ? 'default' : 'outline'} size="icon"
-              onClick={() => { setTool('draw-maint'); bumpDrawPrompt() }} title="Draw maintenance corridor"
+              onClick={() => { setTool('draw-maint'); bumpDrawPrompt() }} title="Draw maintenance corridor" aria-label="Draw maintenance corridor"
             >
               <span className="font-bold">M</span>
             </Button>
             <Button
               variant={tool === 'draw-underground' ? 'default' : 'outline'} size="icon"
-              onClick={() => { setTool('draw-underground'); bumpDrawPrompt() }} title="Draw underground keep-out"
+              onClick={() => { setTool('draw-underground'); bumpDrawPrompt() }} title="Draw underground keep-out" aria-label="Draw underground keep-out"
             >
               <span className="font-bold">U</span>
             </Button>
             <Button
               variant={tool === 'draw-keepout' ? 'default' : 'outline'} size="icon"
-              onClick={() => { setTool('draw-keepout'); bumpDrawPrompt() }} title="Draw keep-out zone"
+              onClick={() => { setTool('draw-keepout'); bumpDrawPrompt() }} title="Draw keep-out zone" aria-label="Draw keep-out zone"
             >
               <span className="font-bold">K</span>
             </Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Snap">
-            <Toggle variant="outline" pressed={snap} onPressedChange={setSnap} title="Snap to grid">
+            <Toggle variant="outline" pressed={snap} onPressedChange={setSnap} title="Snap to grid" aria-label="Snap to grid">
               <Magnet />
             </Toggle>
           </Group>
@@ -477,14 +519,29 @@ export default function Ribbon(props) {
         {selectedZone && (
           <TabsContent value="zone" className="ribbon-body">
             <Group label="Selected zone">
-              <Button variant="outline" size="icon" onClick={() => bumpEditPrompt()} title="Edit selected zone">
+              <Button variant="outline" size="icon" onClick={() => bumpEditPrompt()} title="Edit selected zone" aria-label="Edit selected zone">
                 <Pencil />
               </Button>
               <Button
                 variant="outline" size="icon"
-                onClick={() => deleteZone(selectedZone)} title="Delete selected zone"
+                onClick={() => deleteZone(selectedZone)} title="Delete selected zone" aria-label="Delete selected zone"
               >
                 <Trash2 />
+              </Button>
+            </Group>
+            <Separator orientation="vertical" className="h-auto" />
+            <Group label="Rotate">
+              <Button
+                variant="outline" size="icon"
+                onClick={() => rotateZone(selectedZone, 90)} title="Rotate selected zone 90° CW" aria-label="Rotate selected zone 90° CW"
+              >
+                <RotateCw />
+              </Button>
+              <Button
+                variant="outline" size="icon"
+                onClick={() => rotateZone(selectedZone, 270)} title="Rotate selected zone 270° CW (90° CCW)" aria-label="Rotate selected zone 270° CW (90° CCW)"
+              >
+                <RotateCw className="-scale-x-100" />
               </Button>
             </Group>
           </TabsContent>
@@ -496,15 +553,30 @@ export default function Ribbon(props) {
             <Group label="Selected object">
               <Button
                 variant="outline" size="icon"
-                onClick={() => bumpEditEquipPrompt()} title="Edit selected object"
+                onClick={() => bumpEditEquipPrompt()} title="Edit selected object" aria-label="Edit selected object"
               >
                 <Pencil />
               </Button>
               <Button
                 variant="outline" size="icon"
-                onClick={() => removeEquipment(selectedEquip)} title="Remove selected object"
+                onClick={() => removeEquipment(selectedEquip)} title="Remove selected object" aria-label="Remove selected object"
               >
                 <Trash2 />
+              </Button>
+            </Group>
+            <Separator orientation="vertical" className="h-auto" />
+            <Group label="Rotate">
+              <Button
+                variant="outline" size="icon"
+                onClick={() => rotateEquipment(selectedEquip, 90)} title="Rotate selected equipment 90° CW" aria-label="Rotate selected equipment 90° CW"
+              >
+                <RotateCw />
+              </Button>
+              <Button
+                variant="outline" size="icon"
+                onClick={() => rotateEquipment(selectedEquip, 270)} title="Rotate selected equipment 270° CW (90° CCW)" aria-label="Rotate selected equipment 270° CW (90° CCW)"
+              >
+                <RotateCw className="-scale-x-100" />
               </Button>
             </Group>
           </TabsContent>
@@ -513,12 +585,12 @@ export default function Ribbon(props) {
         <TabsContent value="view" className="ribbon-body">
           <Group label="Zoom">
             <ZoomDialog zoomPct={zoomPct} setZoomPercent={setZoomPercent} />
-            <Button variant="outline" size="icon" onClick={fit} title="Fit width"><ArrowLeftRight /></Button>
+            <Button variant="outline" size="icon" onClick={fit} title="Fit width" aria-label="Fit width"><ArrowLeftRight /></Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="View mode">
             <Select value={viewMode} onValueChange={setViewMode}>
-              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-32" aria-label="View mode"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="normal">Normal</SelectItem>
                 <SelectItem value="wireframe">Wireframe</SelectItem>
@@ -532,21 +604,23 @@ export default function Ribbon(props) {
               value={[showGrid && 'grid', showRuler && 'ruler'].filter(Boolean)}
               onValueChange={(vals) => { setShowGrid(vals.includes('grid')); setShowRuler(vals.includes('ruler')) }}
             >
-              <ToggleGroupItem value="grid" title="Grid"><Grid3x3 /></ToggleGroupItem>
-              <ToggleGroupItem value="ruler" title="Rulers"><Ruler /></ToggleGroupItem>
+              <ToggleGroupItem value="grid" title="Grid" aria-label="Grid"><Grid3x3 /></ToggleGroupItem>
+              <ToggleGroupItem value="ruler" title="Rulers" aria-label="Rulers"><Ruler /></ToggleGroupItem>
             </ToggleGroup>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Grid & ruler spacing">
             <div className="flex flex-col gap-1">
+              <Label htmlFor="gridstep" className="sr-only">Grid spacing (m)</Label>
               <div className="flex gap-1">
                 <Input
-                  id="gridstep" type="number" min="0.1" step="1" placeholder="auto"
+                  id="gridstep" type="number" min="0.1" step="1" placeholder="auto…"
                   value={gridStep ?? ''}
                   onChange={(e) => setGridStep(e.target.value === '' ? null : Number(e.target.value))}
+                  aria-label="Grid spacing in meters, blank for auto"
                   className="w-20"
                 />
-                <Button variant="outline" size="sm" onClick={() => setGridStep(null)} title="Auto spacing">
+                <Button variant="outline" size="sm" onClick={() => setGridStep(null)} title="Auto spacing" aria-label="Auto spacing">
                   Auto
                 </Button>
               </div>
@@ -557,8 +631,8 @@ export default function Ribbon(props) {
             <ToggleGroup type="single" variant="outline" value={tool}
               onValueChange={(v) => v && setTool(v)}
             >
-              <ToggleGroupItem value="select" title="Select / drag"><MousePointer2 /></ToggleGroupItem>
-              <ToggleGroupItem value="pan" title="Pan"><Hand /></ToggleGroupItem>
+              <ToggleGroupItem value="select" title="Select / drag" aria-label="Select / drag"><MousePointer2 /></ToggleGroupItem>
+              <ToggleGroupItem value="pan" title="Pan" aria-label="Pan"><Hand /></ToggleGroupItem>
             </ToggleGroup>
           </Group>
         </TabsContent>
@@ -573,6 +647,9 @@ export default function Ribbon(props) {
               rackWidth={rackWidth} setRackWidth={setRackWidth}
               rackBeamSpacing={rackBeamSpacing} setRackBeamSpacing={setRackBeamSpacing}
               roadWidth={roadWidth} setRoadWidth={setRoadWidth}
+              showGrid={showGrid} setShowGrid={setShowGrid}
+              showRuler={showRuler} setShowRuler={setShowRuler}
+              gridStep={gridStep} setGridStep={setGridStep}
             />
           </Group>
         </TabsContent>

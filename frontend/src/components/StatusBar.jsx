@@ -17,7 +17,11 @@ export default function StatusBar({
     <div className="statusbar">
       <span>{projectLabel ?? '—'}</span>
       <span className="status-sep" />
-      <span className={score && !score.feasible ? 'text-destructive' : ''}>
+      <span
+        className={score && !score.feasible ? 'text-destructive' : ''}
+        role="status"
+        aria-live="polite"
+      >
         {score == null
           ? 'no layout scored'
           : score.feasible
@@ -28,9 +32,13 @@ export default function StatusBar({
         <>
           <span className="status-sep" />
           {relaxOk
-            ? <span className="statusbar-realtime">⚡ Real-time</span>
+            ? <span className="statusbar-realtime" aria-label="Real-time layout mode on">⚡ Real-time</span>
             : (
-              <span className="text-destructive" title="Too many overlaps for real-time to legalize — try Solve first, or drag to a more open spot">
+              <span
+                className="text-destructive"
+                title="Too many overlaps for real-time to legalize — try Solve first, or drag to a more open spot"
+                aria-label="Real-time layout mode on, but can't reflow here — too many overlaps, try Solve first or drag to a more open spot"
+              >
                 ⚡ Real-time — can't reflow here
               </span>
             )}
@@ -43,19 +51,19 @@ export default function StatusBar({
             <strong>{selected.tag}</strong>
             <span className="statusbar-selected-field">{selected.cls}</span>
             <span className="statusbar-selected-field">
-              {selectedPos.x.toFixed(1)}, {selectedPos.y.toFixed(1)} m
+              {selectedPos.x.toFixed(1)}, {selectedPos.y.toFixed(1)}&nbsp;m
             </span>
-            <span className="statusbar-selected-field">{selected.w}×{selected.d} m</span>
+            <span className="statusbar-selected-field">{selected.w}×{selected.d}&nbsp;m</span>
             {nearby && (
               <span className="statusbar-selected-field">
-                near {nearby.other} {nearby.gap.toFixed(1)} m
+                near {nearby.other} {nearby.gap.toFixed(1)}&nbsp;m
               </span>
             )}
           </span>
         </>
       )}
       <span className="ml-auto tabular-nums">
-        {cursor ? `x ${cursor.x.toFixed(1)}  y ${cursor.y.toFixed(1)} m` : ''}
+        {cursor ? `x ${cursor.x.toFixed(1)}  y ${cursor.y.toFixed(1)}\u00a0m` : ''}
       </span>
       <span className="status-sep" />
       <span className="capitalize">{tool}</span>
@@ -65,12 +73,16 @@ export default function StatusBar({
         value={Math.min(400, Math.max(10, zoomPct))}
         onChange={(e) => setZoomPercent(Number(e.target.value))}
         className="zoom-slider" title={`${zoomPct}%`}
+        aria-label={`Zoom ${zoomPct}%`}
       />
       <datalist id="zoom-100"><option value="100" /></datalist>
       <ZoomDialog
         zoomPct={zoomPct} setZoomPercent={setZoomPercent}
         trigger={(
-          <button type="button" className="tabular-nums w-10 text-right zoom-pct-btn">
+          <button
+            type="button" className="tabular-nums w-10 text-right zoom-pct-btn"
+            aria-label={`Zoom ${zoomPct} percent, open zoom dialog`}
+          >
             {zoomPct}%
           </button>
         )}

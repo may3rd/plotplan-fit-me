@@ -110,3 +110,28 @@ export function rotateSide(side, deg) {
   for (let i = 0; i < (deg / 90) % 4; i++) s = ROTATE_CW[s] ?? s
   return s
 }
+
+// Rotate a polygon (array of [x, y] world points) `deg` (90/180/270)
+// clockwise about its centroid. 180° is the degenerate case: vertices map
+// onto each other in reverse order, so re-rotate the first vertex by an
+// extra 90° and reverse the list to keep the polygon's winding (and thus
+// its on-canvas outline direction) stable — otherwise a 180°-rotated
+// rect would render identical to its unrotated self but with a flipped
+// SVG path direction, which is invisible for a plain fill but can matter
+// for stroke-dash/merge outlines. For 90°/270° the per-vertex rotation
+// already preserves order.
+export function rotatePolyCW(poly, deg) {
+  if (!poly?.length) return poly
+  const steps = (deg / 90) % 4
+  if (steps === 0) return poly
+  const cx = poly.reduce((s, [x]) => s + x, 0) / poly.length
+  const cy = poly.reduce((s, [, y]) => s + y, 0) / poly.length
+  const rot = ([x, y]) => {
+    let nx = x, ny = y
+    for (let i = 0; i < steps; i++) { const ox = nx; nx = cx + (ny - cy); ny = cy - (ox - cx) }
+    return [nx, ny]
+  }
+  const out = poly.map(rot)
+  if (steps === 2) out.reverse()
+  return out
+}
