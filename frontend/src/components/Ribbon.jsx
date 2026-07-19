@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowLeftRight, Crosshair, FilePlus, FileUp, Frame, Grid3x3, Hand, Info, LayoutGrid,
+  ArrowLeftRight, Crosshair, FilePlus, FileUp, Frame, Grid3x3, Hand, Info,
   ListOrdered, MousePointer2, Palette, Pause, Pencil, Play, Redo2, RotateCw, Ruler,
   Save, Search, Settings as SettingsIcon, Trash2, Undo2, Zap, ZoomIn,
 } from 'lucide-react'
@@ -338,7 +338,6 @@ export default function Ribbon(props) {
         {/* single Word-style row: File menu, the ribbon tabs, then Help menu
             pushed to the right — no separate menu-bar strip above the tabs. */}
         <div className="ribbon-tabrow">
-          <LayoutGrid className="app-icon" aria-hidden="true" />
           <Menubar className="titlebar-menubar border-0 bg-transparent p-0 shadow-none" aria-label="File menu">
             <MenubarMenu>
               <MenubarTrigger>File</MenubarTrigger>
