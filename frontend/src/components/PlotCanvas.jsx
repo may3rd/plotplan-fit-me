@@ -33,7 +33,6 @@ const RACK_BEAM_END_MIN_GAP_M = 3
 // the inside). Either is capped by whatever its adjacent road stubs actually
 // allow (see roundedPolygonPath).
 const ROAD_INNER_RADIUS_M = 8
-const RACK_COLUMN_SIZE = 1.0 // meters, side length of the tiny column marker square
 // A zone-draw press+release with less movement than this (world meters)
 // counts as a tap, not a drag, and inserts a sensible default shape instead
 // of whatever near-zero-size shape the exact pointer positions would give.
@@ -117,13 +116,18 @@ function snapAxisAligned(start, p) {
 // rectangle's own LEFT edge (wider-than-tall) or TOP edge (max Y — this app
 // is north-up with a toY screen flip — taller-than-wide), derived from its
 // bounding box rather than draw order, so a merged rack's spacing lines up
-// the same regardless of which original zone/corner it grew from. If the
-// last regular interval would land within RACK_BEAM_END_MIN_GAP_M of the far
-// end, that beam snaps exactly to the end instead of leaving an awkwardly
-// short final bay. `excludeDRanges` (local d-coordinates along the length
-// axis, 0 = anchor) drops any beam that would fall inside another rack's
-// footprint where this one crosses it — see rackCrossDRange.
-function rackHatchSegments(poly, spacing, excludeDRanges = []) {
+// the same regardless of which original zone/corner it grew from. For a
+// rack in a merged cluster, pass `anchorD` = the near edge of its
+// leftmost/topmost crossing square (in local d-coordinates) so beams radiate
+// OUTWARD from the merge area in both directions instead of from the
+// rack's own near edge — matches how a real rack's steel bays frame the
+// crossing and spread out from it. If the last regular interval would land
+// within RACK_BEAM_END_MIN_GAP_M of the far end, that beam snaps exactly to
+// the end instead of leaving an awkwardly short final bay. `excludeDRanges`
+// (local d-coordinates along the length axis, 0 = anchor) drops any beam
+// that would fall inside another rack's footprint where this one crosses
+// it — see rackCrossDRange.
+function rackHatchSegments(poly, spacing, excludeDRanges = [], anchorD = 0) {
   if (!(spacing > 0)) return [] // guard against a bad (<=0/NaN) spacing value hanging the loop below
   const { minX, maxX, minY, maxY } = zoneBBox(poly)
   const w = maxX - minX
@@ -138,8 +142,24 @@ function rackHatchSegments(poly, spacing, excludeDRanges = []) {
   const ux = horizontal ? 1 : 0
   const uy = horizontal ? 0 : -1
   if (len < 1e-6) return []
+  // beams at anchorD + k*spacing for every integer k whose beam falls inside
+  // [0, len] — radiates outward from the anchor in both directions.
   const positions = []
-  for (let d = spacing; d < len; d += spacing) positions.push(d)
+  if (anchorD >= 0 && anchorD <= len) positions.push(anchorD)
+  for (let k = 1; ; k++) {
+    let d = anchorD + k * spacing
+    if (d > len) break
+    positions.push(d)
+    d = anchorD - k * spacing
+    if (d >= 0) positions.push(d)
+  }
+  positions.sort((a, b) => a - b)
+  // snap a too-close-to-either-end final beam to that end — applies on both
+  // the far end (last beam) and the near end (first beam), so an anchor that
+  // happens to land near an edge still produces a clean edge beam.
+  if (positions.length && positions[0] < RACK_BEAM_END_MIN_GAP_M) {
+    positions[0] = 0
+  }
   if (positions.length && len - positions[positions.length - 1] < RACK_BEAM_END_MIN_GAP_M) {
     positions[positions.length - 1] = len
   }
@@ -429,21 +449,13 @@ function convexCornerFlags(outline) {
   })
 }
 
-// Tiny column markers for a pipe rack: one at each of the 4 corners, plus one
-// at each point where a cross-tie hatch line meets the rack's long edge.
-function rackColumnPoints(poly, hatch) {
-  const pts = [...poly]
-  hatch.forEach((seg) => pts.push([seg.x1, seg.y1], [seg.x2, seg.y2]))
-  return pts
-}
-
 export default function PlotCanvas({
   data, positions, onPositions, view, setView, showGrid, showRuler, gridStep, snap, tool, setTool,
   viewMode,
   rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth, drawPromptNonce,
   editPromptNonce, onCursor, onSize, onAddZone, onDeleteZone, onEditZone,
   selectedZone, setSelectedZone, editMode,
-  selectedEquip, setSelectedEquip,
+  selectedEquip, setSelectedEquip, editEquipPromptNonce, onEditEquipment,
   realtimeMode, relaxLayout, flushRelax,
 }) {
   const { equipment, connections, site, keepouts, spacing, wind_clearance_m: windClearanceM } = data
@@ -500,6 +512,7 @@ export default function PlotCanvas({
   const [drawRect, setDrawRect] = useState(null) // live press-drag-release preview {x1,y1,x2,y2}
   const [dragVert, setDragVert] = useState(null) // {zone, index} | {zone, edge} while dragging a vertex/edge handle
   const [editOpen, setEditOpen] = useState(false) // zone rename/role dialog
+  const [editEquipOpen, setEditEquipOpen] = useState(false) // equipment properties dialog
   const [drawPromptOpen, setDrawPromptOpen] = useState(false)
   const [drawPromptVal, setDrawPromptVal] = useState(String(drawWidth))
   const [drawPromptSpacingVal, setDrawPromptSpacingVal] = useState(String(rackBeamSpacing)) // rack-only "Beam spacing (m)" field
@@ -599,6 +612,13 @@ export default function PlotCanvas({
     setEditOpen(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editPromptNonce])
+
+  // Same pattern for the ribbon's Object > Edit button.
+  useEffect(() => {
+    if (!selectedEquip) return
+    setEditEquipOpen(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editEquipPromptNonce])
 
   function confirmDrawWidth() {
     const n = Number(drawPromptVal)
@@ -989,14 +1009,6 @@ export default function PlotCanvas({
                 {viewMode !== 'dxf' && hatch.map((l, i) => (
                   <line key={i} x1={l.x1} y1={toY(l.y1)} x2={l.x2} y2={toY(l.y2)} className="rack-hatch" />
                 ))}
-                {viewMode !== 'dxf' && kind === 'rack' && !quiet && rackColumnPoints(poly, hatch).map(([x, y], i) => (
-                  <rect
-                    key={`col${i}`}
-                    x={x - RACK_COLUMN_SIZE / 2} y={toY(y) - RACK_COLUMN_SIZE / 2}
-                    width={RACK_COLUMN_SIZE} height={RACK_COLUMN_SIZE}
-                    className="rack-column"
-                  />
-                ))}
                 {viewMode === 'dxf' ? (
                   // real DXF export labels every zone with its own name, not a
                   // generic "Pipe Rack"/"Road" — see backend write_dxf/_zone_layer.
@@ -1085,10 +1097,17 @@ export default function PlotCanvas({
             if (outline.length < 3) return null
             const [cx, cy] = centroid(outline)
             const hatch = cluster.flatMap((r) => {
-              const excludeDRanges = cluster
+              const crossings = cluster
                 .filter((other) => other !== r && rectsOverlap(r.bbox, other.bbox))
-                .map((other) => rackCrossDRange(r.bbox, other.bbox))
-              return rackHatchSegments(r.poly, rackBeamSpacing, excludeDRanges)
+              const excludeDRanges = crossings.map((other) => rackCrossDRange(r.bbox, other.bbox))
+              // anchor at the near edge of the leftmost (horizontal rack) or
+              // topmost (vertical rack) crossing square — beams radiate
+              // outward from the merge area, and if a rack has 2 crossings,
+              // from the one closer to the rack's own anchor end.
+              const anchorD = crossings.length
+                ? Math.min(...excludeDRanges.map(([lo]) => lo))
+                : 0
+              return rackHatchSegments(r.poly, rackBeamSpacing, excludeDRanges, anchorD)
             })
             return (
               <g key={`rack-merge-${ci}`}>
@@ -1098,14 +1117,6 @@ export default function PlotCanvas({
                 />
                 {hatch.map((l, i) => (
                   <line key={i} x1={l.x1} y1={toY(l.y1)} x2={l.x2} y2={toY(l.y2)} className="rack-hatch" />
-                ))}
-                {rackColumnPoints(outline, hatch).map(([x, y], i) => (
-                  <rect
-                    key={`col${i}`}
-                    x={x - RACK_COLUMN_SIZE / 2} y={toY(y) - RACK_COLUMN_SIZE / 2}
-                    width={RACK_COLUMN_SIZE} height={RACK_COLUMN_SIZE}
-                    className="rack-column"
-                  />
                 ))}
                 <text x={cx} y={toY(cy) + 0.6} className="rack-label">Pipe Rack</text>
               </g>
@@ -1160,7 +1171,12 @@ export default function PlotCanvas({
                   className={`equip ${e.pinned ? 'pinned' : ''} ${violating ? 'violating' : ''} ${selectedEquip === e.tag ? 'selected' : ''}`}
                   onPointerDown={(ev) => onPointerDownEquip(e.tag, ev)}
                 />
-                <text x={p.x} y={toY(p.y) - e.d / 2 - 0.6} className="tag">{e.tag}</text>
+                <text
+                  x={p.x} y={toY(p.y) - e.d / 2 - 0.6}
+                  className={`tag ${selectedEquip === e.tag ? 'selected' : ''}`}
+                >
+                  {e.tag}
+                </text>
               </g>
             )
           })}
@@ -1303,6 +1319,13 @@ export default function PlotCanvas({
           onRename={onEditZone}
           onDelete={(name) => { onDeleteZone(name); setSelectedZone(null); setEditOpen(false) }}
         />
+
+        <EquipEditDialog
+          open={editEquipOpen}
+          equip={selectedEquip ? byTag[selectedEquip] : null}
+          onOpenChange={setEditEquipOpen}
+          onSave={onEditEquipment}
+        />
       </div>
     </div>
   )
@@ -1383,6 +1406,114 @@ function ZoneEditDialog({ open, zone, keepouts, onOpenChange, onRename, onDelete
         </div>
         <DialogFooter className="gap-2">
           <Button variant="destructive" onClick={() => onDelete(zone)}>Delete</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={apply}>Apply</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Edit dialog for a selected equipment: class, footprint size, pinned, and
+// tube-pull clearance. Deliberately does NOT include the tag/ID — see
+// editEquipment's own comment in App.jsx for why a rename is out of scope
+// here — or position (x/y), same reasoning as the zone dialog above: that's
+// what dragging on the canvas is for.
+function EquipEditDialog({ open, equip, onOpenChange, onSave }) {
+  const [cls, setCls] = useState('')
+  const [w, setW] = useState('')
+  const [d, setD] = useState('')
+  const [pinned, setPinned] = useState(false)
+  const [pullSide, setPullSide] = useState('')
+  const [pullLen, setPullLen] = useState('')
+
+  useEffect(() => {
+    if (!open || !equip) return
+    setCls(equip.cls)
+    setW(String(equip.w))
+    setD(String(equip.d))
+    setPinned(!!equip.pinned)
+    setPullSide(equip.pull_side || '')
+    setPullLen(String(equip.pull_len || 0))
+  }, [open, equip])
+
+  if (!equip) return null
+
+  function apply() {
+    const wNum = Number(w), dNum = Number(d), pullLenNum = Number(pullLen)
+    onSave(equip.tag, {
+      cls,
+      w: Number.isFinite(wNum) && wNum > 0 ? wNum : equip.w,
+      d: Number.isFinite(dNum) && dNum > 0 ? dNum : equip.d,
+      pinned,
+      pull_side: pullSide,
+      pull_len: pullSide && Number.isFinite(pullLenNum) && pullLenNum > 0 ? pullLenNum : 0,
+    })
+    onOpenChange(false)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit {equip.tag}</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1">
+            <Label className="text-sm">Class</Label>
+            <Select value={cls} onValueChange={setCls}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {Object.keys(CLASS_COLOR).map((c) => (
+                  <SelectItem key={c} value={c}>{c}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="equip-w" className="text-sm">Width (m)</Label>
+              <Input
+                id="equip-w" type="number" min="0.1" step="0.1" value={w}
+                onChange={(e) => setW(e.target.value)} className="w-24"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="equip-d" className="text-sm">Depth (m)</Label>
+              <Input
+                id="equip-d" type="number" min="0.1" step="0.1" value={d}
+                onChange={(e) => setD(e.target.value)} className="w-24"
+              />
+            </div>
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={pinned} onChange={(e) => setPinned(e.target.checked)} />
+            Pinned (fixed position, solver won't move it)
+          </label>
+          <div className="flex items-center gap-2">
+            <div className="flex flex-col gap-1">
+              <Label className="text-sm">Pull side</Label>
+              <Select value={pullSide || 'none'} onValueChange={(v) => setPullSide(v === 'none' ? '' : v)}>
+                <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="x+">x+</SelectItem>
+                  <SelectItem value="x-">x-</SelectItem>
+                  <SelectItem value="y+">y+</SelectItem>
+                  <SelectItem value="y-">y-</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="equip-pull-len" className="text-sm">Pull length (m)</Label>
+              <Input
+                id="equip-pull-len" type="number" min="0" step="0.5" value={pullLen}
+                onChange={(e) => setPullLen(e.target.value)} disabled={!pullSide} className="w-24"
+              />
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button onClick={apply}>Apply</Button>
         </DialogFooter>

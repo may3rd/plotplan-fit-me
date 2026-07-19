@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Loader2, Magnet,
-  MousePointer2, Palette, Pencil, Play, RotateCw, Ruler, Save, Search, Settings as SettingsIcon,
+  ArrowLeftRight, FilePlus, FileUp, Grid3x3, Hand, Info, LayoutGrid, ListOrdered, Magnet,
+  MousePointer2, Palette, Pause, Pencil, Play, RotateCw, Ruler, Save, Search, Settings as SettingsIcon,
   Trash2, Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -87,36 +87,44 @@ export function ZoomDialog({ zoomPct, setZoomPercent, trigger }) {
   )
 }
 
-// Ranked seed/score table from the last Solve — hidden until `results` exist.
-function ResultsDialog({ results }) {
+// Ranked case table from the last Solve — hidden until `cases` exist.
+// Each row's "View" button applies that case's own layout to the canvas
+// (App.jsx's applyCase) so the user can browse/compare every randomly-
+// seeded case's arrangement, not just the winner Solve already applied.
+// `cases` arrives from the backend pre-sorted best-cost-first.
+function ResultsDialog({ cases, applyCase }) {
   const [open, setOpen] = useState(false)
-  if (!results?.length) return null
-  const bestCost = Math.min(...results.map((r) => r.cost))
+  if (!cases?.length) return null
+  const bestCost = cases[0].cost
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="icon" title="Seed results">
+        <Button variant="ghost" size="icon" title="Case results">
           <ListOrdered className="size-4" />
         </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Seed results</DialogTitle>
+          <DialogTitle>Case results</DialogTitle>
         </DialogHeader>
         <div className="max-h-[60vh] overflow-y-auto">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-background">
               <tr className="text-left text-muted-foreground">
-                <th className="pb-1">Seed</th>
+                <th className="pb-1">Case</th>
                 <th className="pb-1">Score</th>
+                <th className="pb-1" />
               </tr>
             </thead>
             <tbody>
-              {[...results].sort((a, b) => a.cost - b.cost).map((r) => (
-                <tr key={r.seed} className={r.cost === bestCost ? 'font-semibold' : ''}>
-                  <td>{r.seed}</td>
-                  <td>{r.cost.toFixed(0)}{r.cost === bestCost ? ' (best)' : ''}</td>
+              {cases.map((c, i) => (
+                <tr key={c.seed} className={c.cost === bestCost ? 'font-semibold' : ''}>
+                  <td className="py-0.5">{i + 1}</td>
+                  <td>{c.cost.toFixed(0)}{c.cost === bestCost ? ' (best)' : ''}</td>
+                  <td className="pl-2">
+                    <Button variant="outline" size="sm" onClick={() => applyCase(c)}>View</Button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -236,12 +244,12 @@ function SettingsDialog({
 
 export default function Ribbon(props) {
   const {
-    units, unitName, setUnitName, seedsInput, setSeedsInput, solve, solving, results,
+    units, unitName, setUnitName, caseCount, setCaseCount, solve, stopSolve, solving, cases, applyCase,
     showGrid, setShowGrid, showRuler, setShowRuler, gridStep, setGridStep, snap, setSnap,
     viewMode, setViewMode,
     tool, setTool, bumpDrawPrompt, fit, zoomPct, setZoomPercent,
     bumpEditPrompt, selectedZone, deleteZone,
-    selectedEquip, rotateEquipment,
+    selectedEquip, rotateEquipment, bumpEditEquipPrompt, removeEquipment,
     newProject, openProject, saveProject, saveProjectAs, exportDxf, exportTakeoff, exportRaster,
     theme, setTheme,
     rackWidth, setRackWidth, rackBeamSpacing, setRackBeamSpacing, roadWidth, setRoadWidth,
@@ -249,6 +257,22 @@ export default function Ribbon(props) {
   } = props
 
   const openInputRef = useRef(null)
+  // "Zone" and "Object" are contextual tabs (Word's Table Design/Layout
+  // pattern) — each only exists in the tab list while its kind of thing is
+  // selected, and selecting one jumps you straight to its tab instead of
+  // leaving it to be found by hand. Deselecting falls back to Home, but
+  // only if a contextual tab was actually the active one — if the user had
+  // already clicked elsewhere, losing the selection shouldn't yank them
+  // off whatever tab they're on. Zone and Object selection are mutually
+  // exclusive in practice (equipment only selects in Select mode, zones
+  // only in Edit mode, and switching tool mode clears both), so there's
+  // never a conflict over which contextual tab should win.
+  const [activeTab, setActiveTab] = useState('home')
+  useEffect(() => {
+    if (selectedZone) setActiveTab('zone')
+    else if (selectedEquip) setActiveTab('object')
+    else setActiveTab((t) => (t === 'zone' || t === 'object' ? 'home' : t))
+  }, [selectedZone, selectedEquip])
 
   function handleOpenFile(e) {
     const file = e.target.files[0]
@@ -262,7 +286,7 @@ export default function Ribbon(props) {
         ref={openInputRef} type="file" accept=".json,application/json"
         className="hidden" onChange={handleOpenFile}
       />
-      <Tabs defaultValue="home" className="ribbon-tabs gap-0">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="ribbon-tabs gap-0">
         {/* single Word-style row: File menu, the ribbon tabs, then Help menu
             pushed to the right — no separate menu-bar strip above the tabs. */}
         <div className="ribbon-tabrow">
@@ -302,6 +326,12 @@ export default function Ribbon(props) {
             <TabsTrigger value="insert">Insert</TabsTrigger>
             <TabsTrigger value="view">View</TabsTrigger>
             <TabsTrigger value="tools">Tools</TabsTrigger>
+            {selectedZone && (
+              <TabsTrigger value="zone" className="ribbon-tab-contextual">Zone</TabsTrigger>
+            )}
+            {selectedEquip && (
+              <TabsTrigger value="object" className="ribbon-tab-contextual">Object</TabsTrigger>
+            )}
           </TabsList>
 
           <Menubar className="titlebar-menubar ml-auto border-0 bg-transparent p-0 shadow-none">
@@ -370,17 +400,21 @@ export default function Ribbon(props) {
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Solve">
-            <Button onClick={solve} disabled={solving} className="solve-btn flex-col gap-1 px-4">
-              {solving ? <Loader2 className="size-5 animate-spin" /> : <Play className="size-5" />}
+            <Button
+              onClick={solving ? stopSolve : solve} className="solve-btn flex-col gap-1 px-4"
+              title={solving ? 'Stop solving' : 'Solve'}
+            >
+              {solving ? <Pause className="size-5" /> : <Play className="size-5" />}
             </Button>
-            <ResultsDialog results={results} />
+            <ResultsDialog cases={cases} applyCase={applyCase} />
           </Group>
           <Separator orientation="vertical" className="h-auto" />
-          <Group label="Seeds">
+          <Group label="Cases">
             <div className="flex flex-col gap-1">
               <Input
-                id="seeds" value={seedsInput} onChange={(e) => setSeedsInput(e.target.value)}
-                title="n or a:b" placeholder="n or a:b" className="w-16"
+                id="cases" type="number" min="1" step="1" value={caseCount}
+                onChange={(e) => setCaseCount(e.target.value)}
+                title="how many randomly-seeded cases to try" className="w-16"
               />
             </div>
           </Group>
@@ -429,29 +463,52 @@ export default function Ribbon(props) {
             </Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
-          <Group label="Selected zone">
-            <Button
-              variant="outline" size="icon"
-              disabled={!selectedZone}
-              onClick={() => bumpEditPrompt()} title="Edit selected zone"
-            >
-              <Pencil />
-            </Button>
-            <Button
-              variant="outline" size="icon"
-              disabled={!selectedZone}
-              onClick={() => deleteZone(selectedZone)} title="Delete selected zone"
-            >
-              <Trash2 />
-            </Button>
-          </Group>
-          <Separator orientation="vertical" className="h-auto" />
           <Group label="Snap">
             <Toggle variant="outline" pressed={snap} onPressedChange={setSnap} title="Snap to grid">
               <Magnet />
             </Toggle>
           </Group>
         </TabsContent>
+
+        {/* contextual tab, Word's Table Design/Layout pattern — only exists
+            (in both the tab list above and here) while a zone is selected;
+            see the activeTab effect. No disabled-button guards needed
+            anymore since this content literally can't render otherwise. */}
+        {selectedZone && (
+          <TabsContent value="zone" className="ribbon-body">
+            <Group label="Selected zone">
+              <Button variant="outline" size="icon" onClick={() => bumpEditPrompt()} title="Edit selected zone">
+                <Pencil />
+              </Button>
+              <Button
+                variant="outline" size="icon"
+                onClick={() => deleteZone(selectedZone)} title="Delete selected zone"
+              >
+                <Trash2 />
+              </Button>
+            </Group>
+          </TabsContent>
+        )}
+
+        {/* same pattern as the Zone tab above, for a selected equipment. */}
+        {selectedEquip && (
+          <TabsContent value="object" className="ribbon-body">
+            <Group label="Selected object">
+              <Button
+                variant="outline" size="icon"
+                onClick={() => bumpEditEquipPrompt()} title="Edit selected object"
+              >
+                <Pencil />
+              </Button>
+              <Button
+                variant="outline" size="icon"
+                onClick={() => removeEquipment(selectedEquip)} title="Remove selected object"
+              >
+                <Trash2 />
+              </Button>
+            </Group>
+          </TabsContent>
+        )}
 
         <TabsContent value="view" className="ribbon-body">
           <Group label="Zoom">

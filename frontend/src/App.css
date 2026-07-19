@@ -134,6 +134,20 @@
   bottom: 0 !important;
 }
 
+/* contextual tab (Word's Table Design/Layout pattern) — amber instead of
+   the usual accent, in both its idle and active states, so it visually
+   reads as "appeared because something's selected" rather than just
+   another regular tab. */
+.ribbon-tablist .ribbon-tab-contextual {
+  color: #d97706;
+}
+.ribbon-tablist .ribbon-tab-contextual[data-state='active'] {
+  color: #d97706;
+}
+.ribbon-tablist .ribbon-tab-contextual[data-state='active']::after {
+  background: #d97706 !important;
+}
+
 .ribbon-body {
   display: flex;
   align-items: stretch;
@@ -286,6 +300,26 @@
   font-weight: 600;
 }
 
+/* selected-equipment readout — tag ID (amber, matching the canvas
+   selection highlight) followed by type/position/size/nearest-neighbor,
+   each field prefixed with a dot separator instead of literal punctuation
+   in the JSX. */
+.statusbar-selected {
+  display: inline-flex;
+  align-items: center;
+}
+
+.statusbar-selected strong {
+  color: #d97706;
+  font-weight: 700;
+}
+
+.statusbar-selected-field::before {
+  content: '\00b7';
+  margin: 0 0.4em;
+  color: var(--border);
+}
+
 /* minimal native range input — no custom track/thumb chrome beyond sizing */
 .zoom-slider {
   width: 80px;
@@ -371,17 +405,6 @@
   font-weight: 600;
   text-anchor: middle;
   fill: #2f5e34;
-  pointer-events: none;
-}
-
-/* tiny column markers at each rack corner + cross-tie meeting point —
-   outlined, white-filled square (not solid), like a structural column
-   symbol drawn over the rack fill/hatch rather than a solid blob. */
-.rack-column {
-  fill: #fff;
-  stroke: #4a8f52;
-  stroke-width: 0.6;
-  vector-effect: non-scaling-stroke;
   pointer-events: none;
 }
 
@@ -547,14 +570,21 @@
   stroke-dasharray: 3 2;
 }
 
+.equip.selected {
+  stroke: #d97706;
+  stroke-width: 2.5;
+  stroke-dasharray: 4 3;
+}
+
+/* a violation (from an active drag) is the more urgent, transient signal —
+   must win over the merely-persistent "selected" amber outline whenever
+   the dragged item is both selected and currently too close to a
+   neighbor. Defined after .equip.selected so it wins the cascade (same
+   specificity, source order breaks the tie). */
 .equip.violating {
   stroke: #c0392b;
   stroke-width: 2.5;
-}
-
-.equip.selected {
-  stroke: #2563eb;
-  stroke-width: 2.5;
+  stroke-dasharray: none;
 }
 
 .tag {
@@ -562,6 +592,11 @@
   text-anchor: middle;
   fill: #222;
   pointer-events: none;
+}
+
+.tag.selected {
+  fill: #d97706;
+  font-weight: 700;
 }
 
 /* ---- pull / wind clearance zones ---------------------------------------- */

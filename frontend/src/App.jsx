@@ -16,10 +16,10 @@ function App() {
   const [positions, setPositions] = useState({}) // tag -> {x, y}
   const [fileName, setFileName] = useState(null) // last-used Save/Open filename, or null (unsaved)
   const [score, setScore] = useState(null) // {feasible, cost}
-  const [seedsInput, setSeedsInput] = useState('0:8')
+  const [caseCount, setCaseCount] = useState(8) // how many randomly-seeded cases Solve tries
   const [solving, setSolving] = useState(false)
   const [solveProgress, setSolveProgress] = useState(null) // {fraction, seed, seed_index, seed_count} | null
-  const [results, setResults] = useState(null) // [{seed, cost}, ...] from the last solve
+  const [cases, setCases] = useState(null) // [{seed, cost, equipment}, ...] from the last solve, best cost first
 
   // view / canvas state
   const [view, setView] = useState(null) // SVG viewBox {x,y,w,h}, null until fitted
@@ -40,10 +40,25 @@ function App() {
   const bumpDrawPrompt = useCallback(() => setDrawPromptNonce((n) => n + 1), [])
   const [editPromptNonce, setEditPromptNonce] = useState(0) // bump to open the selected zone's edit dialog
   const bumpEditPrompt = useCallback(() => setEditPromptNonce((n) => n + 1), [])
+  const [editEquipPromptNonce, setEditEquipPromptNonce] = useState(0) // bump to open the selected equipment's edit dialog
+  const bumpEditEquipPrompt = useCallback(() => setEditEquipPromptNonce((n) => n + 1), [])
   const [selectedZone, setSelectedZone] = useState(null) // currently selected keep-out/road/rack zone
   const [selectedEquip, setSelectedEquip] = useState(null) // currently selected equipment tag
+
+  // switching tool mode (Select / Pan / Edit, or a draw-* tool) makes
+  // whatever was selected under the OLD mode stale — e.g. an equipment
+  // selection only makes sense in Select mode, a zone selection in Edit
+  // mode — so drop both on every mode change rather than leaving a
+  // highlight/status-bar readout for an object the current tool can't
+  // even act on.
+  useEffect(() => {
+    setSelectedZone(null)
+    setSelectedEquip(null)
+  }, [tool])
+
   const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
   const fittedFor = useRef(null)
+  const solveAbortRef = useRef(null) // AbortController for the in-flight /api/solve request, if any
 
   const reqId = useRef(0)
 
@@ -56,7 +71,7 @@ function App() {
     for (const e of d.equipment) pos[e.tag] = { x: e.x, y: e.y }
     setPositions(pos)
     setScore(null)
-    setResults(null)
+    setCases(null)
     setSelectedEquip(null)
   }, [])
 
@@ -284,6 +299,38 @@ function App() {
     }))
   }, [])
 
+  // Ribbon's Object > Edit dialog: patch the selected equipment's own
+  // fields (class/size/pinned/pull clearance). Deliberately does NOT
+  // include `tag` — a rename would also have to rewrite `positions`'
+  // key, `selectedEquip`, and every `connections` entry referencing the
+  // old tag; keeping tag read-only in the dialog sidesteps that whole
+  // class of bug for a field that's really just an identifier, not a
+  // "property" of the equipment the way class/size/pinned are.
+  const editEquipment = useCallback((tag, patch) => {
+    setData((d) => ({
+      ...d,
+      equipment: d.equipment.map((e) => (e.tag === tag ? { ...e, ...patch } : e)),
+    }))
+  }, [])
+
+  // Ribbon's Object > Remove button: drop the equipment itself, its
+  // position, and any connection referencing it (a dangling connection
+  // would otherwise crash the next Score/Solve call server-side, since
+  // piping_cost() looks up both ends by tag with no missing-tag guard).
+  const removeEquipment = useCallback((tag) => {
+    setData((d) => ({
+      ...d,
+      equipment: d.equipment.filter((e) => e.tag !== tag),
+      connections: (d.connections ?? []).filter((c) => c.a !== tag && c.b !== tag),
+    }))
+    setPositions((p) => {
+      const next = { ...p }
+      delete next[tag]
+      return next
+    })
+    setSelectedEquip(null)
+  }, [])
+
   const zoomCenter = useCallback((factor) => {
     if (!csize?.width) return
     setView((v) => zoomAt(v, csize, csize.width / 2, csize.height / 2, factor))
@@ -303,19 +350,22 @@ function App() {
   }, [data, csize])
 
   async function solve() {
+    const controller = new AbortController()
+    solveAbortRef.current = controller
     setSolving(true)
     setSolveProgress({ fraction: 0, seed: null, seed_index: 0, seed_count: 1 })
     try {
-      const seeds = seedsInput.includes(':')
-        ? (() => {
-            const [a, b] = seedsInput.split(':').map(Number)
-            return Array.from({ length: b - a }, (_, i) => a + i)
-          })()
-        : [Number(seedsInput)]
+      // ponytail: a seed is just an integer that seeds Python's
+      // random.Random() — any distinct integers work, so "N random cases"
+      // is simply N fresh random integers, no different from the old
+      // hand-typed 0:N sequential range as far as the solver's concerned.
+      const n = Math.max(1, Math.round(Number(caseCount) || 1))
+      const seeds = Array.from({ length: n }, () => Math.floor(Math.random() * 1e9))
       const r = await fetch('/api/solve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
         body: JSON.stringify({ data: buildCaseData(data, positions), seeds }),
+        signal: controller.signal,
       })
       if (!r.ok || !r.body) throw new Error(`solve failed: ${r.status}`)
       // ponytail: /api/solve is now an SSE stream (POST, so no EventSource —
@@ -360,11 +410,37 @@ function App() {
       setPositions(pos)
       applyRotations(result.equipment)
       setScore({ feasible: true, cost: result.cost })
-      setResults(result.results)
+      setCases(result.cases)
+    } catch (err) {
+      // ponytail: an aborted fetch (stopSolve's doing) is an intentional
+      // cancel, not a failure — the backend's should_stop already returns
+      // its best-so-far layout when stopped, but the client's own reader
+      // gets torn down by the abort before that final `done` event can
+      // arrive, so there's nothing to apply here; just leave the layout as
+      // it was before Solve was clicked.
+      if (err.name !== 'AbortError') throw err
     } finally {
       setSolving(false)
       setSolveProgress(null)
+      solveAbortRef.current = null
     }
+  }
+
+  function stopSolve() {
+    solveAbortRef.current?.abort()
+  }
+
+  // Ribbon's Results dialog: browse any of the last Solve's cases, not
+  // just the winner — clicking a row applies that case's layout the exact
+  // same way solve()'s own `done` handler applies the best one (positions,
+  // rotations, score), so switching between cases is just as cheap/
+  // reversible as a normal drag or re-solve.
+  function applyCase(c) {
+    const pos = {}
+    for (const e of c.equipment) pos[e.tag] = { x: e.x, y: e.y }
+    setPositions(pos)
+    applyRotations(c.equipment)
+    setScore({ feasible: true, cost: c.cost })
   }
 
   async function downloadResponse(url, fallbackName) {
@@ -452,8 +528,8 @@ function App() {
     <div className="app-shell">
       <Ribbon
         units={units} unitName={unitName} setUnitName={setUnitName}
-        seedsInput={seedsInput} setSeedsInput={setSeedsInput}
-        solve={solve} solving={solving} results={results}
+        caseCount={caseCount} setCaseCount={setCaseCount}
+        solve={solve} stopSolve={stopSolve} solving={solving} cases={cases} applyCase={applyCase}
         showGrid={showGrid} setShowGrid={setShowGrid}
         showRuler={showRuler} setShowRuler={setShowRuler}
         gridStep={gridStep} setGridStep={setGridStep}
@@ -462,6 +538,7 @@ function App() {
         tool={tool} setTool={setTool} bumpDrawPrompt={bumpDrawPrompt} fit={fit}
         bumpEditPrompt={bumpEditPrompt} selectedZone={selectedZone} deleteZone={deleteSelectedZone}
         selectedEquip={selectedEquip} rotateEquipment={rotateEquipment}
+        bumpEditEquipPrompt={bumpEditEquipPrompt} removeEquipment={removeEquipment}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
         newProject={newProject} openProject={openProject}
         saveProject={saveProject} saveProjectAs={saveProjectAs}
@@ -497,6 +574,7 @@ function App() {
           roadWidth={roadWidth} setRoadWidth={setRoadWidth}
           drawPromptNonce={drawPromptNonce}
           editPromptNonce={editPromptNonce}
+          editEquipPromptNonce={editEquipPromptNonce} onEditEquipment={editEquipment}
           onCursor={setCursor} onSize={setCsize}
           onAddZone={addZone} onDeleteZone={deleteZone} onEditZone={editZone}
           selectedZone={selectedZone} setSelectedZone={setSelectedZone}
@@ -508,6 +586,7 @@ function App() {
         projectLabel={fileName ?? data.name ?? 'untitled'} score={score} cursor={cursor}
         zoomPct={view ? zoomPercent(view, fitW.current) : 100} setZoomPercent={setZoomPercent}
         tool={tool} realtimeMode={realtimeMode} relaxOk={relaxOk}
+        data={data} positions={positions} selectedEquip={selectedEquip}
       />
     </div>
   )

@@ -194,7 +194,10 @@ def solve_data(req: SolveRequest, request: Request):
     and an `improve` event every time that seed's SA finds a new best
     (PLAN.md item 18 — an anytime stream: the frontend can plot a live
     score curve instead of just a %-done bar), then a final `done` event
-    with the result.
+    with the result. `done`'s `cases` field carries every seed's own full
+    layout (not just the winner's, which is also duplicated at the
+    top-level `equipment` field for convenience) so the frontend can let a
+    user browse/preview each case, not only the best one.
     ponytail: a background thread runs the blocking solver while the
     request thread yields SSE chunks from a queue — FastAPI's
     StreamingResponse drives the SSE wire format, the thread + queue
@@ -219,6 +222,8 @@ def solve_data(req: SolveRequest, request: Request):
         try:
             n = len(req.seeds)
             results = []
+            cases = []  # every seed's own full layout, not just the winner — lets the
+                        # frontend let a user browse/preview each case, not just the best
             best = None  # (cost, eq)
             for i, seed in enumerate(req.seeds):
                 if stop_event.is_set():
@@ -234,17 +239,20 @@ def solve_data(req: SolveRequest, request: Request):
                 cost = solve_one(eq, conns, site, spacing, keepouts, seed=seed,
                                  on_improve=on_improve, should_stop=stop_event.is_set)
                 results.append((seed, cost))
+                cases.append({"seed": seed, "cost": cost, "equipment": [asdict(e) for e in eq]})
                 if best is None or cost < best[0]:
                     best = (cost, eq)
             if best is None:
                 emit("error", {"message": "stopped before any seed finished"})
                 return
             results.sort(key=lambda r: r[1])
+            cases.sort(key=lambda c: c["cost"])
             emit("done", {
                 "results": [{"seed": s, "cost": c} for s, c in results],
                 "cost": best[0],
                 "equipment": [asdict(e) for e in best[1]],
                 "stopped": stop_event.is_set(),
+                "cases": cases,
             })
         except Exception as e:  # ponytail: surface solver errors to the UI instead of a hung stream
             emit("error", {"message": str(e)})

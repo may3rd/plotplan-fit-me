@@ -1,8 +1,18 @@
+import { useMemo } from 'react'
 import { ZoomDialog } from '@/components/Ribbon'
+import { buildSpacingMap, closestPair } from '@/lib/geom'
 
 export default function StatusBar({
   projectLabel, score, cursor, zoomPct, setZoomPercent, tool, realtimeMode, relaxOk,
+  data, positions, selectedEquip,
 }) {
+  const spacingMap = useMemo(() => buildSpacingMap(data.spacing), [data.spacing])
+  const selected = selectedEquip ? data.equipment.find((e) => e.tag === selectedEquip) : null
+  const selectedPos = selected ? (positions[selected.tag] ?? { x: selected.x, y: selected.y }) : null
+  const nearby = selected
+    ? closestPair(selected.tag, positions, data.equipment, spacingMap)
+    : null
+
   return (
     <div className="statusbar">
       <span>{projectLabel ?? '—'}</span>
@@ -24,6 +34,24 @@ export default function StatusBar({
                 ⚡ Real-time — can't reflow here
               </span>
             )}
+        </>
+      )}
+      {selected && (
+        <>
+          <span className="status-sep" />
+          <span className="tabular-nums statusbar-selected">
+            <strong>{selected.tag}</strong>
+            <span className="statusbar-selected-field">{selected.cls}</span>
+            <span className="statusbar-selected-field">
+              {selectedPos.x.toFixed(1)}, {selectedPos.y.toFixed(1)} m
+            </span>
+            <span className="statusbar-selected-field">{selected.w}×{selected.d} m</span>
+            {nearby && (
+              <span className="statusbar-selected-field">
+                near {nearby.other} {nearby.gap.toFixed(1)} m
+              </span>
+            )}
+          </span>
         </>
       )}
       <span className="ml-auto tabular-nums">
