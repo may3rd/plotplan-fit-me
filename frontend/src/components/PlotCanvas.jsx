@@ -505,6 +505,11 @@ export default function PlotCanvas({
   const [size, setSize] = useState({ width: 0, height: 0 })
   const dragTag = useRef(null) // single dragged equipment tag
   const dragGroup = useRef(null) // {tags:[...], offs:{tag:{dx,dy}}} multi-select dragged group
+  // ponytail: commit the undo snapshot lazily — on the first pointermove
+  // that actually moves something, not on pointer-down. A plain
+  // select-click (down→up, no move) then commits nothing, so it leaves no
+  // phantom undo step. Reset to false at every drag-start.
+  const dragCommitted = useRef(false)
   const pan = useRef(null) // {x, y} last client pos while panning
   const dragZone = useRef(null) // {zone, offX, offY} while dragging a whole zone in edit mode
   const drawStart = useRef(null) // {x, y} world point where a zone-draw drag began
@@ -770,7 +775,7 @@ export default function PlotCanvas({
     }
     if (byTag[tag].pinned) return
     dragTag.current = tag
-    onInteractionStart?.()
+    dragCommitted.current = false // commit deferred to first real move
     capture(ev)
   }
 
@@ -788,7 +793,7 @@ export default function PlotCanvas({
     // a fixed distance behind the cursor as it moves (no jump on first move).
     const wy = site.d - p.y
     dragZone.current = { zone, ox: first[0] - p.x, oy: first[1] - wy }
-    onInteractionStart?.()
+    dragCommitted.current = false // commit deferred to first real move
     capture(ev)
   }
 
@@ -798,7 +803,7 @@ export default function PlotCanvas({
     ev.stopPropagation()
     setSelectedZone(zone)
     setDragVert({ zone, index })
-    onInteractionStart?.()
+    dragCommitted.current = false // commit deferred to first real move
     capture(ev)
   }
 
@@ -824,12 +829,22 @@ export default function PlotCanvas({
       px: p.x, py: site.d - p.y,
       perp,
     })
-    onInteractionStart?.()
+    dragCommitted.current = false // commit deferred to first real move
     capture(ev)
   }
 
   function onPointerMove(ev) {
     reportCursor(ev)
+    // Lazy undo commit: a drag-start sets dragCommitted=false; the first
+    // move frame that actually moves a target fires the snapshot here,
+    // so a pure select-click (down→up, no move) leaves no phantom undo
+    // step. Only the equip/zone/vertex/edge drags use this — pan/marquee/
+    // zoom/draw don't mutate data/positions and never called
+    // onInteractionStart to begin with.
+    if (!dragCommitted.current && (dragTag.current || dragZone.current || dragVert)) {
+      onInteractionStart?.()
+      dragCommitted.current = true
+    }
     if (pan.current) {
       const rect = wrapRef.current.getBoundingClientRect()
       const dx = ev.clientX - pan.current.x

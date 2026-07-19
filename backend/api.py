@@ -174,10 +174,18 @@ def relax(req: RelaxRequest):
     if req.tag not in by_tag:
         raise HTTPException(404, f"unknown equipment tag: {req.tag}")
     dragged = by_tag[req.tag]
+    # Restore the dragged item's ORIGINAL pinned flag before both returns so
+    # the serialized asdict(e) payload reflects the item's real flag — the
+    # forced True below is a temporary solve-time pin only, never a property
+    # change. Solver behavior is unaffected (push_repair/solve still see it
+    # pinned during this call).
+    orig_pinned = dragged.pinned
     dragged.x, dragged.y, dragged.pinned = req.x, req.y, True
     if not feasible(eq, site, spacing, keepouts) and not push_repair(eq, site, spacing, keepouts):
+        dragged.pinned = orig_pinned
         return {"feasible": False, "cost": None, "equipment": [asdict(e) for e in eq]}
     cost = solve(eq, conns, site, spacing, keepouts, seed=0, iters=req.iters, t0=req.t0, warm_start=True)
+    dragged.pinned = orig_pinned
     return {"feasible": True, "cost": cost, "equipment": [asdict(e) for e in eq]}
 
 

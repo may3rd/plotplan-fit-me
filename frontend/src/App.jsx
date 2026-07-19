@@ -159,6 +159,7 @@ function App() {
   }, [snapshot, bumpHist])
 
   const undo = useCallback(() => {
+    cancelRelax()
     if (!pastRef.current.length) return
     const prev = pastRef.current[pastRef.current.length - 1]
     const cur = snapshot()
@@ -174,6 +175,7 @@ function App() {
   }, [snapshot, markDirty, bumpHist])
 
   const redo = useCallback(() => {
+    cancelRelax()
     if (!futureRef.current.length) return
     const [next, ...rest] = futureRef.current
     const cur = snapshot()
@@ -244,15 +246,48 @@ function App() {
   }, [tool])
 
   const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
-  const fittedFor = useRef(null)
+  // true = the next fit effect run should re-fit the viewport. Explicit
+  // flag instead of "did `data` identity change" — `data` gets a new
+  // object identity on every relax/rotate/edit response too, and none of
+  // those should ever snap the viewport back to full-site fit.
+  const wantFitRef = useRef(true)
   const solveAbortRef = useRef(null) // AbortController for the in-flight /api/solve request, if any
 
   const reqId = useRef(0)
+
+  // --- Mode 2: real-time layouting (PLAN.md items 16-17, POST /api/relax) ---
+  // Declared up here (not next to fireRelax) so onPositions can gate the
+  // per-frame /score call on realtimeMode, and cancelRelax can be defined
+  // before undo/redo/applyProject call it.
+  const [realtimeMode, setRealtimeMode] = useState(false)
+  // Whether the LAST /relax attempt actually reflowed the layout (vs. push-
+  // repair/SA finding no legal fix and reporting infeasible) — surfaced in
+  // the status bar so a blocked reflow reads as "can't fit this", not as
+  // "real-time mode isn't doing anything". Starts true so the ribbon
+  // doesn't flash a warning before the first drag.
+  const [relaxOk, setRelaxOk] = useState(true)
+  const relaxReqId = useRef(0)
+  const relaxThrottle = useRef({ lastSentAt: 0, timer: null, latest: null })
+
+  // Cancel any in-flight /relax: bump the id so a late response fails the
+  // id-guard in fireRelax, and clear any pending throttled send. A hoisted
+  // function declaration (not a const arrow) so undo/redo/applyProject can
+  // reference it before its line in the source — it only reads refs, so no
+  // useCallback/stable-identity concern.
+  function cancelRelax() {
+    relaxReqId.current += 1
+    if (relaxThrottle.current.timer) {
+      clearTimeout(relaxThrottle.current.timer)
+      relaxThrottle.current.timer = null
+    }
+  }
 
   // shared by the unit-picker load, File > New, and File > Open — swaps in
   // a whole new project (data + positions rebuilt from its equipment) and
   // clears anything that belonged to the previous one.
   const applyProject = useCallback((d) => {
+    cancelRelax()
+    wantFitRef.current = true // a fresh project should fit the viewport
     setData(d)
     const pos = {}
     for (const e of d.equipment) pos[e.tag] = { x: e.x, y: e.y }
@@ -299,23 +334,30 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unitName])
 
-  // fit once per loaded unit; on later resizes re-fit the viewBox aspect to
+  // Fit the viewport ONLY on an explicit request (fresh project load via
+  // applyProject setting wantFitRef, or the manual Fit-width button) — never
+  // because `data` got a new object identity, which also happens on every
+  // relax/rotate/edit response and would snap a zoomed-in drag back to
+  // full-site fit ~10x/sec. The early-return for !csize?.width comes before
+  // the flag check so a pre-canvas load still fits once the canvas measures.
+  useEffect(() => {
+    if (!csize?.width) return
+    if (!wantFitRef.current) return
+    if (!data) return
+    const fv = fitView(data.site, csize)
+    setView(fv)
+    fitW.current = fv.w
+    wantFitRef.current = false
+  }, [data, csize])
+
+  // On canvas resize only (not data change), re-fit the viewBox aspect to
   // the new canvas aspect so the world→screen mapping stays undistorted
   // (preserveAspectRatio="none" would otherwise stretch the plot when the
   // window narrows/widens). Keeps the same center and width (i.e. the user's
   // zoom level), only height tracks the new aspect — see reaspect().
   useEffect(() => {
-    if (!data || !csize?.width) return
-    if (fittedFor.current !== data) {
-      const fv = fitView(data.site, csize)
-      setView(fv)
-      fitW.current = fv.w
-      fittedFor.current = data
-    } else if (view) {
-      setView(reaspect(view, csize))
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, csize])
+    setView((v) => (v ? reaspect(v, csize) : v))
+  }, [csize])
 
   const scoreLayout = useCallback((pos) => {
     if (!data) return
@@ -336,9 +378,13 @@ function App() {
 
   const onPositions = useCallback((next) => {
     setPositions(next)
-    scoreLayout(next)
+    // In real-time mode the relax response is the authoritative source of
+    // {feasible, cost}; a competing per-frame /score would only head-of-line-
+    // block relax on the same origin and could overwrite the fresher relax
+    // verdict with a stale one. Skip it.
+    if (!realtimeMode) scoreLayout(next)
     markDirty()
-  }, [scoreLayout, markDirty])
+  }, [scoreLayout, markDirty, realtimeMode])
 
   // Merge solver-driven shape changes (w/d/pull_side — the SA rotate move
   // and CP-SAT's ROT var can both flip an item's orientation while
@@ -351,34 +397,33 @@ function App() {
   const applyRotations = useCallback((resEquipment) => {
     setData((d) => {
       const byTag = Object.fromEntries(resEquipment.map((e) => [e.tag, e]))
-      return {
-        ...d,
-        equipment: d.equipment.map((e) => {
-          const r = byTag[e.tag]
-          return r ? { ...e, w: r.w, d: r.d, pull_side: r.pull_side } : e
-        }),
-      }
+      let changed = false
+      const equipment = d.equipment.map((e) => {
+        const r = byTag[e.tag]
+        if (!r) return e
+        if (r.w === e.w && r.d === e.d && r.pull_side === e.pull_side) return e
+        changed = true
+        return { ...e, w: r.w, d: r.d, pull_side: r.pull_side }
+      })
+      // Identity-stable: a relax response that didn't actually rotate
+      // anything returns the same `data` reference, so React bails the
+      // update — no redundant [data]-effect /score and no churn. (With the
+      // fit effect split off this no longer affects the viewport, but it
+      // still removes the redundant score path for the common drag.)
+      if (!changed) return d
+      return { ...d, equipment }
     })
   }, [])
 
-  // --- Mode 2: real-time layouting (PLAN.md items 16-17, POST /api/relax) ---
-  // Toggled from the Home ribbon. While on, dragging an item also throttle-
-  // calls /relax, which pins the dragged item at the cursor and reflows
-  // every other item around it (server-side warm-start SA, with push-repair
-  // legalizing a packed-row drop) — /score's per-frame call still runs too,
-  // for the instant local feedback /relax's ~100ms round trip can't match;
-  // /relax's response (feasible flag + reflowed positions) simply supersedes
-  // it a beat later.
-  const [realtimeMode, setRealtimeMode] = useState(false)
-  // Whether the LAST /relax attempt actually reflowed the layout (vs. push-
-  // repair/SA finding no legal fix and reporting infeasible) — surfaced in
-  // the status bar so a blocked reflow reads as "can't fit this", not as
-  // "real-time mode isn't doing anything". Starts true so the ribbon
-  // doesn't flash a warning before the first drag.
-  const [relaxOk, setRelaxOk] = useState(true)
-  const relaxReqId = useRef(0)
-  const relaxThrottle = useRef({ lastSentAt: 0, timer: null, latest: null })
-
+  // --- Mode 2: real-time layouting (POST /api/relax) ---------------------
+  // realtimeMode/relaxOk/relaxReqId/relaxThrottle are declared up near the
+  // other refs (before onPositions) — see above. Toggled from the Home
+  // ribbon. While on, dragging an item also throttle-calls /relax, which
+  // pins the dragged item at the cursor and reflows every other item
+  // around it (server-side warm-start SA, with push-repair legalizing a
+  // packed-row drop); the relax response (feasible flag + reflowed
+  // positions) is the authoritative source of {feasible, cost} in real-time
+  // mode, so drag frames skip the competing per-frame /score call.
   const fireRelax = useCallback(() => {
     const args = relaxThrottle.current.latest
     relaxThrottle.current.timer = null
