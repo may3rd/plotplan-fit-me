@@ -53,6 +53,25 @@ const EXT_GAP = 0.5     // gap from zone corner to extension-line start
 const EXT_OVER = 1.0    // extension-line overshoot past the dimension line
 const ARROW = 1.2       // arrowhead open-angle size
 
+// Background-image corner-resize handles: index 0=bottom-left, 1=bottom-right,
+// 2=top-right, 3=top-left (world coords, y-up). Dragging a corner keeps the
+// OPPOSITE corner fixed as the anchor; these tables say which side of the
+// anchor the new x/y is computed from (true = anchor minus the new size).
+const BG_HANDLE_X_FROM_ANCHOR = [true, false, false, true]
+const BG_HANDLE_Y_FROM_ANCHOR = [true, true, false, false]
+const BG_HANDLE_CORNERS = [
+  (bg) => [bg.x, bg.y], // 0 bottom-left
+  (bg) => [bg.x + bg.w, bg.y], // 1 bottom-right
+  (bg) => [bg.x + bg.w, bg.y + bg.h], // 2 top-right
+  (bg) => [bg.x, bg.y + bg.h], // 3 top-left
+]
+const BG_HANDLE_ANCHORS = [
+  (bg) => [bg.x + bg.w, bg.y + bg.h], // opposite of 0
+  (bg) => [bg.x, bg.y + bg.h], // opposite of 1
+  (bg) => [bg.x, bg.y], // opposite of 2
+  (bg) => [bg.x + bg.w, bg.y], // opposite of 3
+]
+
 // Compose the granular snap helpers into one drag-frame decision. Priority
 // is object > grid > border — an object near a grid line wins because the
 // user placed it there on purpose. Returns {x, y, snap} where `snap` is the
@@ -488,6 +507,8 @@ export default function PlotCanvas({
   selectedZone, setSelectedZone, editMode,
   selectedEquip, setSelectedEquip, selectedEquips, setSelectedEquips, editEquipPromptNonce, onEditEquipment,
   realtimeMode, relaxLayout, flushRelax, onInteractionStart,
+  backgroundImage, onEditBackgroundImage, onCalibrateBackgroundImage,
+  bgImageSelected, setBgImageSelected, equipOpacity,
 }) {
   const { equipment, connections, site, keepouts, spacing, wind_clearance_m: windClearanceM } = data
   const byTag = Object.fromEntries(equipment.map((e) => [e.tag, e]))
@@ -569,6 +590,14 @@ export default function PlotCanvas({
   const [zoomRect, setZoomRect] = useState(null) // live drag-to-zoom rubber-band preview (screen px)
   const zoomStart = useRef(null) // screen px {x,y} where a drag-to-zoom began
   const [dragVert, setDragVert] = useState(null) // {zone, index} | {zone, edge} while dragging a vertex/edge handle
+  const dragBgImage = useRef(null) // {ox, oy} grab offset (world) while dragging the background image body
+  const dragBgHandle = useRef(null) // {corner, ax, ay} while resizing via a corner handle (ax,ay = fixed opposite corner)
+  const calibStart = useRef(null) // world {x,y} of the first calibration click
+  const [calibPoint, setCalibPoint] = useState(null) // live marker for the first calibration click
+  const [calibPreview, setCalibPreview] = useState(null) // live cursor position (world) between the first and second calibration click
+  const [calibPending, setCalibPending] = useState(null) // {a, b, distWorld} while the calibration distance dialog is open
+  const [calibDialogOpen, setCalibDialogOpen] = useState(false)
+  const [calibVal, setCalibVal] = useState('')
   const [editOpen, setEditOpen] = useState(false) // zone rename/role dialog
   const [editEquipOpen, setEditEquipOpen] = useState(false) // equipment properties dialog
   const [drawPromptOpen, setDrawPromptOpen] = useState(false)
@@ -715,6 +744,22 @@ export default function PlotCanvas({
     setDrawPromptOpen(false)
   }
 
+  function confirmCalibrate() {
+    const n = Number(calibVal)
+    if (Number.isFinite(n) && n > 0 && calibPending?.distWorld > 0) {
+      onCalibrateBackgroundImage(n / calibPending.distWorld)
+    }
+    setCalibDialogOpen(false)
+    setCalibPending(null)
+    setTool('select')
+  }
+
+  function cancelCalibrate() {
+    setCalibDialogOpen(false)
+    setCalibPending(null)
+    setTool('select')
+  }
+
   // Esc cancels an in-progress zone draw (mid press-drag-release) — but
   // never while the width prompt dialog is open.
   useEffect(() => {
@@ -729,6 +774,23 @@ export default function PlotCanvas({
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [zoneDrawing, drawPromptOpen])
+
+  // Esc cancels an in-progress Calibrate Scale click sequence (before the
+  // second click) and drops back to Select — but never while the distance
+  // dialog itself is open (Dialog's own Esc handles that).
+  useEffect(() => {
+    if (tool !== 'calibrate-bg' || calibDialogOpen) return
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        calibStart.current = null
+        setCalibPoint(null)
+        setCalibPreview(null)
+        setTool('select')
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [tool, calibDialogOpen, setTool])
 
   // set the drag/pan state BEFORE trying to capture the pointer: capture can
   // throw (stale/synthetic pointer id) and must not prevent the state from
@@ -755,6 +817,34 @@ export default function PlotCanvas({
       capture(ev)
       return
     }
+    if (tool === 'calibrate-bg') {
+      // two-click sequence: first click records point A, second records
+      // point B and opens the real-world-distance dialog (see
+      // onCalibrateBackgroundImage / confirmCalibrate below). Shift on the
+      // second click snaps B onto the nearer horizontal/vertical line
+      // through A — same axis-align convention as road/rack centerline
+      // drawing (snapAxisAligned), just opt-in here instead of automatic.
+      const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+      let w = { x: p.x, y: site.d - p.y }
+      if (!calibStart.current) {
+        calibStart.current = w
+        setCalibPoint(w)
+      } else {
+        const a = calibStart.current
+        if (ev.shiftKey) {
+          const [sx, sy] = snapAxisAligned([a.x, a.y], [w.x, w.y])
+          w = { x: sx, y: sy }
+        }
+        const distWorld = Math.hypot(w.x - a.x, w.y - a.y)
+        setCalibPending({ a, b: w, distWorld })
+        setCalibDialogOpen(true)
+        setCalibVal('')
+        calibStart.current = null
+        setCalibPoint(null)
+        setCalibPreview(null)
+      }
+      return
+    }
     if (DRAW_PREFIX[tool]) {
       // press-drag-release mode: press sets the start point, dragging
       // previews a custom shape, release commits it (see onPointerUp) — a
@@ -768,6 +858,7 @@ export default function PlotCanvas({
       return
     }
     if (tool === 'select' || tool === 'edit') setSelectedZone(null)
+    if (tool === 'select') setBgImageSelected(false)
     if (tool === 'select') {
       // Start a marquee selection drag on empty canvas — the rect is tracked
       // in screen px (see onPointerMove/onPointerUp); on a plain click with
@@ -787,6 +878,7 @@ export default function PlotCanvas({
     // selected (for rotating) even though they can't be dragged.
     if (tool !== 'select') return
     ev.stopPropagation()
+    setBgImageSelected(false)
     const shift = ev.shiftKey
     const ctrl = ev.ctrlKey || ev.metaKey
     // Multi-select modifiers:
@@ -881,15 +973,57 @@ export default function PlotCanvas({
     capture(ev)
   }
 
+  function onPointerDownBgImage(ev) {
+    // Select-mode only, same as equipment — the image is an object you
+    // select and drag, not a zone you edit.
+    if (tool !== 'select') return
+    ev.stopPropagation()
+    setSelectedZone(null)
+    setSelectedEquips([])
+    setBgImageSelected(true)
+    const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+    const wy = site.d - p.y
+    dragBgImage.current = { ox: backgroundImage.x - p.x, oy: backgroundImage.y - wy }
+    dragCommitted.current = false // commit deferred to first real move
+    capture(ev)
+  }
+
+  function onPointerDownBgHandle(corner, ev) {
+    if (tool !== 'select' || !backgroundImage) return
+    ev.stopPropagation()
+    setBgImageSelected(true)
+    const [ax, ay] = BG_HANDLE_ANCHORS[corner](backgroundImage)
+    dragBgHandle.current = { corner, ax, ay }
+    dragCommitted.current = false // commit deferred to first real move
+    capture(ev)
+  }
+
   function onPointerMove(ev) {
     reportCursor(ev)
+    // Calibrate Scale: after the first click, track the live cursor so the
+    // render below can draw a guide line from that point to wherever the
+    // pointer is now — the second click just freezes it into calibPending.
+    // Shift previews the same axis-snap the click itself applies, so the
+    // guide line matches what clicking now would actually measure.
+    if (tool === 'calibrate-bg' && calibStart.current) {
+      const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+      const start = calibStart.current
+      let w = { x: p.x, y: site.d - p.y }
+      if (ev.shiftKey) {
+        const [sx, sy] = snapAxisAligned([start.x, start.y], [w.x, w.y])
+        w = { x: sx, y: sy }
+      }
+      setCalibPreview(w)
+      return
+    }
     // Lazy undo commit: a drag-start sets dragCommitted=false; the first
     // move frame that actually moves a target fires the snapshot here,
     // so a pure select-click (down→up, no move) leaves no phantom undo
     // step. Only the equip/zone/vertex/edge drags use this — pan/marquee/
     // zoom/draw don't mutate data/positions and never called
     // onInteractionStart to begin with.
-    if (!dragCommitted.current && (dragTag.current || dragZone.current || dragVert)) {
+    if (!dragCommitted.current && (dragTag.current || dragZone.current || dragVert
+        || dragBgImage.current || dragBgHandle.current)) {
       onInteractionStart?.()
       dragCommitted.current = true
     }
@@ -964,6 +1098,29 @@ export default function PlotCanvas({
       onEditZone(zone, poly.map(([vx, vy]) => [vx + dxw, vy + dyw]))
       // keep the grab offset relative to the (now moved) first vertex
       dragZone.current = { zone, ox, oy }
+      return
+    }
+    if (dragBgHandle.current) {
+      // uniform scale: the drag distance from the fixed anchor corner vs.
+      // the ORIGINAL diagonal length gives one scale factor applied to both
+      // w and h, so the aspect ratio never distorts.
+      const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+      const wy = site.d - p.y
+      const { corner, ax, ay } = dragBgHandle.current
+      const origDiag = Math.hypot(backgroundImage.w, backgroundImage.h)
+      const newDiag = Math.hypot(p.x - ax, wy - ay)
+      const factor = Math.max(0.02, newDiag / origDiag)
+      const w = backgroundImage.w * factor
+      const h = backgroundImage.h * factor
+      const x = BG_HANDLE_X_FROM_ANCHOR[corner] ? ax - w : ax
+      const y = BG_HANDLE_Y_FROM_ANCHOR[corner] ? ay - h : ay
+      onEditBackgroundImage({ x, y, w, h })
+      return
+    }
+    if (dragBgImage.current) {
+      const p = svgPoint(svgRef.current, ev.clientX, ev.clientY)
+      const wy = site.d - p.y
+      onEditBackgroundImage({ x: p.x + dragBgImage.current.ox, y: wy + dragBgImage.current.oy })
       return
     }
     if (zoomStart.current) {
@@ -1084,6 +1241,8 @@ export default function PlotCanvas({
     dragTag.current = null
     dragGroup.current = null
     dragZone.current = null
+    dragBgImage.current = null
+    dragBgHandle.current = null
     setDragVert(null)
     setMeasure(null)
     setZoneDim(null)
@@ -1214,9 +1373,28 @@ export default function PlotCanvas({
           onPointerUp={onPointerUp}
           onPointerLeave={() => onCursor(null)}
         >
+          {/* Reference photo of the real plot area, underneath everything
+              else — see the opacity <g> below, which wraps the site/grid/
+              zones/equipment so lowering "Site opacity" reveals this photo
+              through their fills. Not part of the DXF export, so hidden in
+              DXF view like the grid/pipe-routing lines. */}
+          {viewMode !== 'dxf' && backgroundImage && (
+            <image
+              className="bg-image"
+              href={backgroundImage.src}
+              x={backgroundImage.x} y={toY(backgroundImage.y + backgroundImage.h)}
+              width={backgroundImage.w} height={backgroundImage.h}
+              opacity={backgroundImage.opacity}
+              preserveAspectRatio="none"
+              onPointerDown={onPointerDownBgImage}
+            />
+          )}
+
           <clipPath id="site-clip" clipPathUnits="userSpaceOnUse">
             <rect x={0} y={0} width={site.w} height={site.d} />
           </clipPath>
+
+          <g style={{ opacity: equipOpacity }}>
 
           <rect x={0} y={0} width={site.w} height={site.d} className="site" />
 
@@ -1555,6 +1733,63 @@ export default function PlotCanvas({
               </g>
             )
           })()}
+
+          </g>
+
+          {/* background-image selection frame + corner resize handles —
+              rendered OUTSIDE the opacity <g> above (always full opacity,
+              always on top) so they stay usable even when "Site opacity"
+              is turned down to see the photo through. */}
+          {viewMode !== 'dxf' && backgroundImage && bgImageSelected && tool === 'select' && (() => {
+            const { x, y, w, h } = backgroundImage
+            return (
+              <g>
+                <rect
+                  x={x} y={toY(y + h)} width={w} height={h}
+                  className="bg-image-frame"
+                  onPointerDown={onPointerDownBgImage}
+                />
+                {BG_HANDLE_CORNERS.map((fn, i) => {
+                  const [hx, hy] = fn(backgroundImage)
+                  return (
+                    <rect
+                      key={`bgh${i}`}
+                      x={hx - 0.8} y={toY(hy) - 0.8} width={1.6} height={1.6}
+                      className="bg-image-handle"
+                      onPointerDown={(ev) => onPointerDownBgHandle(i, ev)}
+                    />
+                  )
+                })}
+              </g>
+            )
+          })()}
+
+          {/* Calibrate Scale: marker for the first click, a live guide line
+              that follows the cursor while aiming the second click, then the
+              frozen measuring line once both points are placed (kept visible
+              while the distance dialog is open). */}
+          {viewMode !== 'dxf' && calibPoint && (
+            <>
+              <circle cx={calibPoint.x} cy={toY(calibPoint.y)} r={0.6} className="calib-point" />
+              {calibPreview && (
+                <line
+                  x1={calibPoint.x} y1={toY(calibPoint.y)}
+                  x2={calibPreview.x} y2={toY(calibPreview.y)}
+                  className="calib-guide"
+                />
+              )}
+            </>
+          )}
+          {viewMode !== 'dxf' && calibPending && (
+            <g className="calib-line">
+              <line
+                x1={calibPending.a.x} y1={toY(calibPending.a.y)}
+                x2={calibPending.b.x} y2={toY(calibPending.b.y)}
+              />
+              <circle cx={calibPending.a.x} cy={toY(calibPending.a.y)} r={0.6} />
+              <circle cx={calibPending.b.x} cy={toY(calibPending.b.y)} r={0.6} />
+            </g>
+          )}
         </svg>
 
         {zoomRect && (
@@ -1622,6 +1857,33 @@ export default function PlotCanvas({
                 Cancel
               </Button>
               <Button onClick={confirmDrawWidth}>OK</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          open={calibDialogOpen}
+          onOpenChange={(o) => { if (!o) cancelCalibrate() }}
+          onInteractOutside={(e) => e.preventDefault()}
+          onPointerDownOutside={(e) => e.preventDefault()}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Calibrate image scale</DialogTitle>
+            </DialogHeader>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="calib-dist" className="text-sm">Real-world distance between the two points (m)</Label>
+              <Input
+                id="calib-dist" type="number" min="0.01" step="0.1"
+                value={calibVal} autoFocus
+                onChange={(e) => setCalibVal(e.target.value)}
+                className="w-24"
+                onKeyDown={(e) => { if (e.key === 'Enter') confirmCalibrate() }}
+              />
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={cancelCalibrate}>Cancel</Button>
+              <Button onClick={confirmCalibrate}>OK</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

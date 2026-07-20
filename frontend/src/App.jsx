@@ -119,6 +119,8 @@ function App() {
   const bumpEditEquipPrompt = useCallback(() => setEditEquipPromptNonce((n) => n + 1), [])
   const [selectedZone, setSelectedZone] = useState(null) // currently selected keep-out/road/rack zone
   const [selectedEquips, setSelectedEquips] = useState([]) // selected equipment tags (multi-select: shift/ctrl+click, marquee)
+  const [bgImageSelected, setBgImageSelected] = useState(false) // background reference image selected for move/resize
+  const [equipOpacity, setEquipOpacity] = useState(1) // opacity of the rendered site/zones/equipment layer (view preference, not saved)
   // ponytail: primary selection = the last-added tag, kept as a derived
   // value so existing single-selection call sites (Object tab, edit dialog,
   // status bar) read one tag without each reinventing "last of the array".
@@ -178,6 +180,7 @@ function App() {
     setScore(null)
     setSelectedZone(null)
     setSelectedEquips([])
+    setBgImageSelected(false)
     markDirty()
     bumpHist()
   }, [snapshot, markDirty, bumpHist])
@@ -194,6 +197,7 @@ function App() {
     setScore(null)
     setSelectedZone(null)
     setSelectedEquips([])
+    setBgImageSelected(false)
     markDirty()
     bumpHist()
   }, [snapshot, markDirty, bumpHist])
@@ -247,10 +251,15 @@ function App() {
   // selection only makes sense in Select mode, a zone selection in Edit
   // mode — so drop both on every mode change rather than leaving a
   // highlight/status-bar readout for an object the current tool can't
-  // even act on.
+  // even act on. Background-image selection is the one exception: Select
+  // and Calibrate Scale are both "working with the selected image" modes
+  // (the ribbon's Calibrate button just switches into calibrate-bg and
+  // back), so keep it alive across that specific transition — otherwise
+  // clicking Calibrate would immediately close its own Image Format tab.
   useEffect(() => {
     setSelectedZone(null)
     setSelectedEquips([])
+    if (tool !== 'select' && tool !== 'calibrate-bg') setBgImageSelected(false)
   }, [tool])
 
   const fitW = useRef(1) // view.w at 100% (fit), for the zoom readout
@@ -324,6 +333,7 @@ function App() {
     setScore(null)
     setCases(null)
     setSelectedEquips([])
+    setBgImageSelected(false)
     markClean()
     resetHistory()
   }, [markClean, resetHistory])
@@ -587,6 +597,68 @@ function App() {
     deleteZone(name)
     setSelectedZone(null)
   }, [deleteZone])
+
+  // Insert > Insert Image: read the picked file as a data URI, size it from
+  // its natural pixel dimensions (aspect-ratio preserved), center it on the
+  // site, and select it so its resize handles show immediately. A plain
+  // function (not useCallback) so it always reads the CURRENT `data.site`,
+  // same pattern as openProject/saveProject below.
+  function insertBackgroundImage(file) {
+    const reader = new FileReader()
+    reader.onerror = () => setNotice({ title: `Couldn't open "${file.name}"`, body: 'File could not be read.' })
+    reader.onload = () => {
+      const src = reader.result
+      const img = new Image()
+      img.onerror = () => setNotice({ title: `Couldn't open "${file.name}"`, body: 'Not a readable image file.' })
+      img.onload = () => {
+        const w = data.site.w * 0.8
+        const h = w * (img.naturalHeight / img.naturalWidth)
+        commit()
+        setData((d) => ({
+          ...d,
+          backgroundImage: { src, x: d.site.w / 2 - w / 2, y: d.site.d / 2 - h / 2, w, h, opacity: 0.7 },
+        }))
+        setBgImageSelected(true)
+        markDirty()
+      }
+      img.src = src
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const removeBackgroundImage = useCallback(() => {
+    commit()
+    setData((d) => ({ ...d, backgroundImage: null }))
+    setBgImageSelected(false)
+    markDirty()
+  }, [commit, markDirty])
+
+  // Move/resize/calibrate on the canvas: no commit() here, same as editZone
+  // — the drag path commits once at pointer-down via onInteractionStart.
+  const editBackgroundImage = useCallback((patch) => {
+    setData((d) => ({ ...d, backgroundImage: { ...d.backgroundImage, ...patch } }))
+    markDirty()
+  }, [markDirty])
+
+  // Ribbon's opacity slider — cosmetic, not undo-tracked (would spam the
+  // history stack with one entry per drag tick), but still saved with the
+  // project like the image's position/size.
+  const setBackgroundImageOpacity = useCallback((opacity) => {
+    setData((d) => (d.backgroundImage ? { ...d, backgroundImage: { ...d.backgroundImage, opacity } } : d))
+    markDirty()
+  }, [markDirty])
+
+  // Calibrate Scale tool's dialog submit: a discrete (non-drag) edit, so —
+  // like renameZone — it commits its own undo step rather than relying on
+  // onInteractionStart. Rescales w/h by `factor`, anchored at the image's
+  // current x/y (bottom-left stays fixed).
+  const calibrateBackgroundImage = useCallback((factor) => {
+    commit()
+    setData((d) => (d.backgroundImage
+      ? { ...d, backgroundImage: { ...d.backgroundImage, w: d.backgroundImage.w * factor, h: d.backgroundImage.h * factor } }
+      : d))
+    markDirty()
+  }, [commit, markDirty])
 
   // Ribbon's Rotate buttons: rotate the selected equipment's footprint (and
   // its pull_side, if any) 90/180/270 clockwise. Only w/d/pull_side change —
@@ -940,6 +1012,11 @@ function App() {
           realtimeMode={realtimeMode} setRealtimeMode={toggleRealtimeMode}
           setNotice={setNotice}
           undo={undo} redo={redo} canUndo={canUndo} canRedo={canRedo}
+          insertBackgroundImage={insertBackgroundImage} removeBackgroundImage={removeBackgroundImage}
+          backgroundImageOpacity={data.backgroundImage?.opacity ?? 0.7}
+          setBackgroundImageOpacity={setBackgroundImageOpacity}
+          equipOpacity={equipOpacity} setEquipOpacity={setEquipOpacity}
+          bgImageSelected={bgImageSelected}
         />
       </header>
 
@@ -975,6 +1052,11 @@ function App() {
           selectedEquip={selectedEquip} setSelectedEquip={setSelectedEquip}
           selectedEquips={selectedEquips} setSelectedEquips={setSelectedEquips}
           onInteractionStart={onInteractionStart}
+          backgroundImage={data.backgroundImage}
+          onEditBackgroundImage={editBackgroundImage}
+          onCalibrateBackgroundImage={calibrateBackgroundImage}
+          bgImageSelected={bgImageSelected} setBgImageSelected={setBgImageSelected}
+          equipOpacity={equipOpacity}
         />
       </main>
 

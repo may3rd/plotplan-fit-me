@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowLeftRight, Crosshair, FilePlus, FileUp, Frame, Grid3x3, Hand, Info,
+  ArrowLeftRight, Crosshair, FilePlus, FileUp, Frame, Grid3x3, Hand, ImagePlus, Info,
   ListOrdered, MousePointer2, Palette, Pause, Pencil, Play, Redo2, RotateCw, Ruler,
   Save, Search, Settings as SettingsIcon, Trash2, Undo2, Zap, ZoomIn,
 } from 'lucide-react'
@@ -302,25 +302,32 @@ export default function Ribbon(props) {
     realtimeMode, setRealtimeMode,
     setNotice,
     undo, redo, canUndo, canRedo,
+    insertBackgroundImage, removeBackgroundImage,
+    backgroundImageOpacity, setBackgroundImageOpacity,
+    equipOpacity, setEquipOpacity, bgImageSelected,
   } = props
 
   const openInputRef = useRef(null)
-  // "Zone" and "Object" are contextual tabs (Word's Table Design/Layout
-  // pattern) — each only exists in the tab list while its kind of thing is
-  // selected, and selecting one jumps you straight to its tab instead of
-  // leaving it to be found by hand. Deselecting falls back to Home, but
-  // only if a contextual tab was actually the active one — if the user had
-  // already clicked elsewhere, losing the selection shouldn't yank them
-  // off whatever tab they're on. Zone and Object selection are mutually
-  // exclusive in practice (equipment only selects in Select mode, zones
-  // only in Edit mode, and switching tool mode clears both), so there's
-  // never a conflict over which contextual tab should win.
+  const bgInputRef = useRef(null)
+  // "Zone", "Object", and "Image Format" are contextual tabs (Word's Table
+  // Design/Layout — or Picture Format — pattern) — each only exists in the
+  // tab list while its kind of thing is selected, and selecting one jumps
+  // you straight to its tab instead of leaving it to be found by hand.
+  // Deselecting falls back to Home, but only if a contextual tab was
+  // actually the active one — if the user had already clicked elsewhere,
+  // losing the selection shouldn't yank them off whatever tab they're on.
+  // The three selections are mutually exclusive in practice (equipment only
+  // selects in Select mode, zones only in Edit mode, the background image
+  // only in Select mode alongside equipment but clears equipment/zone
+  // selection on click — see PlotCanvas), so there's never a conflict over
+  // which contextual tab should win.
   const [activeTab, setActiveTab] = useState('home')
   useEffect(() => {
     if (selectedZone) setActiveTab('zone')
     else if (selectedEquip) setActiveTab('object')
-    else setActiveTab((t) => (t === 'zone' || t === 'object' ? 'home' : t))
-  }, [selectedZone, selectedEquip])
+    else if (bgImageSelected) setActiveTab('image')
+    else setActiveTab((t) => (t === 'zone' || t === 'object' || t === 'image' ? 'home' : t))
+  }, [selectedZone, selectedEquip, bgImageSelected])
 
   function handleOpenFile(e) {
     const file = e.target.files[0]
@@ -328,11 +335,21 @@ export default function Ribbon(props) {
     e.target.value = '' // allow re-opening the same filename later
   }
 
+  function handleBgFile(e) {
+    const file = e.target.files[0]
+    if (file) insertBackgroundImage(file)
+    e.target.value = '' // allow re-picking the same filename later
+  }
+
   return (
     <div className="ribbon-shell">
       <input
         ref={openInputRef} type="file" accept=".json,application/json"
         className="hidden" onChange={handleOpenFile}
+      />
+      <input
+        ref={bgInputRef} type="file" accept="image/*"
+        className="hidden" onChange={handleBgFile}
       />
       <Tabs value={activeTab} onValueChange={setActiveTab} className="ribbon-tabs gap-0">
         {/* single Word-style row: File menu, the ribbon tabs, then Help menu
@@ -379,6 +396,9 @@ export default function Ribbon(props) {
             {selectedEquip && (
               <TabsTrigger value="object" className="ribbon-tab-contextual">Object</TabsTrigger>
             )}
+            {bgImageSelected && (
+              <TabsTrigger value="image" className="ribbon-tab-contextual">Image Format</TabsTrigger>
+            )}
           </TabsList>
 
           <Menubar className="titlebar-menubar ml-auto border-0 bg-transparent p-0 shadow-none" aria-label="Help menu">
@@ -402,7 +422,9 @@ export default function Ribbon(props) {
                 <MenubarItem
                   onSelect={() => setNotice?.({
                     title: 'About Plotplan Fit Me',
-                    body: 'Generative plot plan layout tool.',
+                    body: 'Generative plot plan layout tool.\n\n'
+                      + 'Copyright @ GCME 2026\n\n'
+                      + 'Contact: E-PT-PX (Maetee.L@pttgcgroup.com)',
                   })}
                 >
                   <Info className="size-4" /> About
@@ -532,6 +554,16 @@ export default function Ribbon(props) {
             </Button>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
+          <Group label="Background image">
+            <Button
+              variant="outline" size="icon"
+              onClick={() => bgInputRef.current?.click()}
+              title="Insert a reference photo of the actual plot area" aria-label="Insert background image"
+            >
+              <ImagePlus />
+            </Button>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
           <Group label="Snap" title="Snap during drag — Alt suppresses, Shift forces all on">
             <Toggle
               variant="outline" pressed={!!snap.grid}
@@ -628,6 +660,53 @@ export default function Ribbon(props) {
           </TabsContent>
         )}
 
+        {/* same contextual-tab pattern as Zone/Object above — only exists
+            while the background image is selected (Select tool, click the
+            image on the canvas or just finished inserting one). Mirrors
+            Word's Picture Format tab: formatting tools for the ONE thing
+            currently selected, not a general Insert-tab settings panel. */}
+        {bgImageSelected && (
+          <TabsContent value="image" className="ribbon-body">
+            <Group label="Image">
+              <Button
+                variant={tool === 'calibrate-bg' ? 'default' : 'outline'} size="icon"
+                onClick={() => setTool(tool === 'calibrate-bg' ? 'select' : 'calibrate-bg')}
+                title="Calibrate scale — click two points on the image, then enter the real-world distance between them"
+                aria-label="Calibrate image scale"
+              >
+                <Ruler />
+              </Button>
+              <Button
+                variant="outline" size="icon"
+                onClick={removeBackgroundImage} title="Remove background image" aria-label="Remove background image"
+              >
+                <Trash2 />
+              </Button>
+            </Group>
+            <Separator orientation="vertical" className="h-auto" />
+            <Group label="Opacity">
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="bg-opacity" className="text-xs text-muted-foreground">Image opacity</Label>
+                <input
+                  id="bg-opacity" type="range" min="0" max="100" step="1"
+                  value={Math.round((backgroundImageOpacity ?? 0.7) * 100)}
+                  onChange={(e) => setBackgroundImageOpacity(Number(e.target.value) / 100)}
+                  className="zoom-slider" aria-label="Background image opacity"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="site-opacity" className="text-xs text-muted-foreground">Site opacity</Label>
+                <input
+                  id="site-opacity" type="range" min="0" max="100" step="1"
+                  value={Math.round(equipOpacity * 100)}
+                  onChange={(e) => setEquipOpacity(Number(e.target.value) / 100)}
+                  className="zoom-slider" aria-label="Site/equipment layer opacity"
+                />
+              </div>
+            </Group>
+          </TabsContent>
+        )}
+
         <TabsContent value="view" className="ribbon-body">
           <Group label="Zoom">
             <ZoomDialog zoomPct={zoomPct} setZoomPercent={setZoomPercent} />
@@ -661,6 +740,30 @@ export default function Ribbon(props) {
               <ToggleGroupItem value="grid" title="Grid" aria-label="Grid"><Grid3x3 /></ToggleGroupItem>
               <ToggleGroupItem value="ruler" title="Rulers" aria-label="Rulers"><Ruler /></ToggleGroupItem>
             </ToggleGroup>
+          </Group>
+          <Separator orientation="vertical" className="h-auto" />
+          <Group label="Snap" title="Snap during drag — Alt suppresses, Shift forces all on">
+            <Toggle
+              variant="outline" pressed={!!snap.grid}
+              onPressedChange={(v) => setSnap((s) => ({ ...s, grid: v }))}
+              title="Snap to grid" aria-label="Snap to grid"
+            >
+              <Grid3x3 />
+            </Toggle>
+            <Toggle
+              variant="outline" pressed={!!snap.objects}
+              onPressedChange={(v) => setSnap((s) => ({ ...s, objects: v }))}
+              title="Snap to objects (equipment centers, zone vertices)" aria-label="Snap to objects"
+            >
+              <Crosshair />
+            </Toggle>
+            <Toggle
+              variant="outline" pressed={!!snap.borders}
+              onPressedChange={(v) => setSnap((s) => ({ ...s, borders: v }))}
+              title="Snap to site border" aria-label="Snap to site border"
+            >
+              <Frame />
+            </Toggle>
           </Group>
           <Separator orientation="vertical" className="h-auto" />
           <Group label="Grid & ruler spacing">

@@ -60,4 +60,12 @@ assert.throws(() => parseProjectFile('{"equipment": [], "site": null}'), /missin
 // BLANK_PROJECT is itself a valid project file
 assert.equal(parseProjectFile(JSON.stringify(BLANK_PROJECT)).name, 'untitled')
 
+// backgroundImage round-trips through Save/Open when present, and is
+// explicitly null (not just missing) when absent — projectFileContents
+// doesn't route it through buildCaseData (frontend-only, not solver input).
+const withBg = { ...data, backgroundImage: { src: 'data:image/png;base64,AA==', x: 1, y: 2, w: 30, h: 20, opacity: 0.6 } }
+const bgRound = parseProjectFile(projectFileContents(withBg, {}))
+assert.deepEqual(bgRound.backgroundImage, withBg.backgroundImage)
+assert.equal(parseProjectFile(projectFileContents(data, {})).backgroundImage, null)
+
 console.log('project.test.js OK')

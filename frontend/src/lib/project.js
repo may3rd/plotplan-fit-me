@@ -47,6 +47,9 @@ export function projectFileContents(data, positions) {
     version: PROJECT_VERSION,
     ...buildCaseData(data, positions),
     wind_clearance_m: data.wind_clearance_m ?? BLANK_PROJECT.wind_clearance_m,
+    // Reference photo overlay — frontend-only (not sent to the backend via
+    // buildCaseData), but still worth saving/restoring with the project.
+    backgroundImage: data.backgroundImage ?? null,
   }
   return JSON.stringify(body, null, 2)
 }

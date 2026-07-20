@@ -100,20 +100,18 @@
 }
 
 .ribbon-shell {
-  background: var(--office-ribbon-bg);
-  border-bottom: 1px solid var(--border);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04); /* subtle lift, Word 365 */
+  background: var(--app-backdrop);
 }
 
 /* one row: File menu, ribbon tabs, Help menu — the tab strip and
-   the dropdown menus share a single strip, Word-style. */
+   the dropdown menus share a single strip, Word-style. Sits directly on the
+   app backdrop, not on the ribbon-body's white card below it. */
 .ribbon-tabrow {
   display: flex;
   align-items: stretch;
   gap: 0.125rem;
   padding: 0 0.5rem;
   height: 2.4rem;
-  border-bottom: 1px solid var(--border);
 }
 
 /* File / Help dropdown triggers styled to sit flush in the tab strip and
@@ -199,9 +197,12 @@
   display: flex;
   align-items: stretch;
   gap: 0.25rem;
+  margin: 0 0.5rem 0.5rem;
   padding: 0.3rem 0.5rem;
+  border-radius: 8px;
   height: 5.625rem; /* fixed so switching Home/View tabs never resizes the ribbon */
   background: var(--office-ribbon-body-bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); /* subtle lift, Word 365 */
   min-width: 0;
   overflow-x: auto; /* ponytail: when the window is narrower than the group sum, scroll the ribbon instead of overflowing the right edge. */
 }
@@ -489,6 +490,9 @@
 .plot[data-tool='zoom'] .equip,
 .plot[data-tool='zoom'] .zone-vert,
 .plot[data-tool='zoom'] .zone-edge,
+.plot[data-tool='zoom'] .bg-image,
+.plot[data-tool='zoom'] .bg-image-frame,
+.plot[data-tool='zoom'] .bg-image-handle,
 .plot[data-tool='zoom'] .tag {
   cursor: inherit;
 }
@@ -515,6 +519,81 @@
 
 .zone-ghost {
   opacity: 0.4;
+  pointer-events: none;
+}
+
+/* ---- background reference image --------------------------------------- */
+
+.bg-image {
+  cursor: move;
+}
+
+/* selection frame — invisible fill (still catches drag clicks over the
+   whole image, not just its edge) + the same blue dashed outline convention
+   as .zone.selected. */
+.bg-image-frame {
+  fill: transparent;
+  stroke: #2563eb;
+  stroke-width: 1.5;
+  stroke-dasharray: 2 1;
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+}
+
+/* corner resize handle — same visual spec as .zone-vert. */
+.bg-image-handle {
+  fill: #fff;
+  stroke: #2563eb;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  cursor: nwse-resize;
+}
+
+.bg-image-handle:hover {
+  fill: #2563eb;
+}
+
+.plot[data-tool='calibrate-bg'] {
+  cursor: crosshair;
+}
+
+/* Calibrate mode reads a click as "place a measurement point" everywhere on
+   the canvas, including directly over the photo — the image's own .bg-image
+   { cursor: move } (a higher-specificity rule on the same element) would
+   otherwise win and show the wrong affordance while calibrating. */
+.plot[data-tool='calibrate-bg'] .bg-image {
+  cursor: crosshair;
+}
+
+.calib-point {
+  fill: #d97706;
+  pointer-events: none;
+}
+
+.calib-line {
+  pointer-events: none;
+}
+
+.calib-line line {
+  stroke: #d97706;
+  stroke-width: 1;
+  stroke-dasharray: 2 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.calib-line circle {
+  fill: #d97706;
+}
+
+/* live guide line while aiming the second click — vivid and thick so it
+   reads clearly against the site/photo underneath while aiming; distinct
+   from the frozen .calib-line (amber) so "still moving" vs. "placed" don't
+   look identical. */
+.calib-guide {
+  stroke: #ff2d55;
+  stroke-width: 3;
+  stroke-dasharray: 4 2;
+  vector-effect: non-scaling-stroke;
   pointer-events: none;
 }
 
@@ -912,4 +991,12 @@
 .plot[data-view='dxf'] .zone-label,
 .plot[data-view='dxf'] .rack-label {
   fill: #000;
+}
+
+/* DXF export has no photo-embedding concept — the JSX already skips
+   rendering the image/frame/handles in DXF view; this is belt-and-suspenders. */
+.plot[data-view='dxf'] .bg-image,
+.plot[data-view='dxf'] .bg-image-frame,
+.plot[data-view='dxf'] .bg-image-handle {
+  display: none;
 }
